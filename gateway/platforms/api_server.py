@@ -1352,7 +1352,21 @@ class APIServerAdapter(BasePlatformAdapter):
 
         final_response = result.get("final_response", "")
         if not final_response:
-            final_response = result.get("error", "(No response generated)")
+            final_response = result.get("error", "")
+        if not final_response:
+            api_calls = result.get("api_calls", 0)
+            if api_calls == 0:
+                final_response = (
+                    "当前所有模型暂时不可用，请稍后重试。 | "
+                    "All configured models are temporarily unavailable. "
+                    "Please try again in a moment."
+                )
+            else:
+                final_response = (
+                    "模型无法生成回复，请重试或换一种方式提问。 | "
+                    "The model was unable to generate a response. "
+                    "Please try again or rephrase your message."
+                )
 
         response_data = {
             "id": completion_id,
@@ -2354,7 +2368,21 @@ class APIServerAdapter(BasePlatformAdapter):
 
         final_response = result.get("final_response", "")
         if not final_response:
-            final_response = result.get("error", "(No response generated)")
+            final_response = result.get("error", "")
+        if not final_response:
+            api_calls = result.get("api_calls", 0)
+            if api_calls == 0:
+                final_response = (
+                    "当前所有模型暂时不可用，请稍后重试。 | "
+                    "All configured models are temporarily unavailable. "
+                    "Please try again in a moment."
+                )
+            else:
+                final_response = (
+                    "模型无法生成回复，请重试或换一种方式提问。 | "
+                    "The model was unable to generate a response. "
+                    "Please try again or rephrase your message."
+                )
 
         response_id = f"resp_{uuid.uuid4().hex[:28]}"
         created_at = int(time.time())
@@ -2696,7 +2724,21 @@ class APIServerAdapter(BasePlatformAdapter):
         # Final assistant message
         final = result.get("final_response", "")
         if not final:
-            final = result.get("error", "(No response generated)")
+            final = result.get("error", "")
+        if not final:
+            api_calls = result.get("api_calls", 0)
+            if api_calls == 0:
+                final = (
+                    "当前所有模型暂时不可用，请稍后重试。 | "
+                    "All configured models are temporarily unavailable. "
+                    "Please try again in a moment."
+                )
+            else:
+                final = (
+                    "模型无法生成回复，请重试或换一种方式提问。 | "
+                    "The model was unable to generate a response. "
+                    "Please try again or rephrase your message."
+                )
 
         items.append({
             "type": "message",
