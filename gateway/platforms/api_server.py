@@ -44,6 +44,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms.base import cache_image_from_bytes
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
@@ -849,6 +850,170 @@ class APIServerAdapter(BasePlatformAdapter):
         return agent
 
     # ------------------------------------------------------------------
+    # Image routing for multimodal chat completions
+    # ------------------------------------------------------------------
+
+    async def _apply_image_routing(self, user_message: Any) -> Any:
+        """Route user-attached images through the same decision pipeline used
+        by gateway platform adapters.
+
+        Returns *user_message* unchanged for native mode and text-only
+        messages.  Returns a plain-text string with vision descriptions
+        prepended when the decision is ``"text"``.
+        """
+        if not isinstance(user_message, list):
+            return user_message
+        has_image = any(
+            isinstance(p, dict) and str(p.get("type") or "").strip().lower() in _IMAGE_PART_TYPES
+            for p in user_message
+        )
+        if not has_image:
+            return user_message
+
+        try:
+            from agent.image_routing import decide_image_input_mode
+            from agent.auxiliary_client import _read_main_model, _read_main_provider
+            from hermes_cli.config import load_config
+
+            cfg = load_config()
+            provider = _read_main_provider()
+            model = _read_main_model()
+            img_mode = decide_image_input_mode(provider, model, cfg)
+        except Exception:
+            logger.debug("Image routing decision failed, falling back to text", exc_info=True)
+            img_mode = "text"
+
+        img_count = sum(
+            1 for p in user_message
+            if isinstance(p, dict) and str(p.get("type") or "").strip().lower() in _IMAGE_PART_TYPES
+        )
+
+        if img_mode == "text":
+            logger.info("Image routing: text (API server). Pre-analyzing %d image(s) via vision_analyze.", img_count)
+            try:
+                return await self._enrich_multimodal_message_with_vision(user_message)
+            except Exception:
+                logger.error("Vision enrichment failed for API server image", exc_info=True)
+                return user_message
+
+        logger.info("Image routing: native (API server). %d image(s) will be attached inline.", img_count)
+        return user_message
+
+    async def _enrich_multimodal_message_with_vision(
+        self,
+        content_parts: List[Dict[str, Any]],
+    ) -> str:
+        """Pre-analyze images in a multimodal content list with the vision tool.
+
+        When image routing returns "text" mode (user configured a dedicated
+        vision model in aux.vision, or the main model lacks vision support),
+        extract image data from the content parts, analyze each with
+        ``vision_analyze_tool``, and return a plain-text description that
+        the main model can process.
+
+        Data URLs are decoded and cached locally; HTTP URLs are passed
+        directly to the vision tool.
+        """
+        from tools.vision_tools import vision_analyze_tool
+        from agent.memory_manager import sanitize_context
+        import base64 as _base64
+
+        analysis_prompt = (
+            "Describe everything visible in this image in thorough detail. "
+            "Include any text, code, data, objects, people, layout, colors, "
+            "and any other notable visual information."
+        )
+
+        enriched_parts: List[str] = []
+        for part in content_parts:
+            if not isinstance(part, dict):
+                continue
+            ptype = str(part.get("type") or "").strip().lower()
+            if ptype != "image_url":
+                continue
+
+            image_ref = part.get("image_url")
+            if isinstance(image_ref, dict):
+                url_value = image_ref.get("url") or ""
+            else:
+                url_value = str(image_ref or "")
+
+            if not url_value:
+                continue
+
+            vision_url = url_value
+
+            # Decode data URLs to local cache so the vision tool can read them.
+            if url_value.startswith("data:"):
+                try:
+                    header, b64_data = url_value.split(",", 1)
+                    mime = header.split(":")[1].split(";")[0] if ":" in header else "image/jpeg"
+                    ext_map = {
+                        "image/jpeg": ".jpg",
+                        "image/png": ".png",
+                        "image/webp": ".webp",
+                        "image/gif": ".gif",
+                        "image/bmp": ".bmp",
+                    }
+                    ext = ext_map.get(mime, ".jpg")
+                    # Normalise: strip whitespace/newlines, fix URL-safe chars,
+                    # add missing padding.
+                    b64_data = b64_data.strip().replace('\n', '').replace('\r', '')
+                    b64_data = b64_data.replace('-', '+').replace('_', '/')
+                    missing_padding = len(b64_data) % 4
+                    if missing_padding:
+                        b64_data += '=' * (4 - missing_padding)
+                    raw = _base64.b64decode(b64_data)
+                    vision_url = cache_image_from_bytes(raw, ext=ext)
+                except Exception:
+                    logger.warning("Failed to decode data URL for vision pre-analysis", exc_info=True)
+                    continue
+
+            try:
+                logger.debug("Auto-analyzing user image via API server: %s", vision_url[:80])
+                result_json = await vision_analyze_tool(
+                    image_url=vision_url,
+                    user_prompt=analysis_prompt,
+                )
+                result = json.loads(result_json)
+                if result.get("success"):
+                    description = sanitize_context(result.get("analysis", ""))
+                    enriched_parts.append(
+                        f"[The user sent an image. Here's what I can see:\n{description}]\n"
+                        f"[If you need a closer look, use vision_analyze with "
+                        f"image_url: {vision_url}]"
+                    )
+                else:
+                    enriched_parts.append(
+                        "[The user sent an image but I couldn't analyze it "
+                        "this time. You can try looking at it yourself "
+                        f"with vision_analyze using image_url: {vision_url}]"
+                    )
+            except Exception:
+                logger.error("Vision auto-analysis error", exc_info=True)
+                enriched_parts.append(
+                    "[The user sent an image but something went wrong when I "
+                    "tried to look at it. You can try examining it yourself "
+                    f"with vision_analyze using image_url: {vision_url}]"
+                )
+
+        # Combine vision descriptions with any text from the original content.
+        text_parts: List[str] = []
+        for part in content_parts:
+            if isinstance(part, dict) and str(part.get("type") or "").strip().lower() == "text":
+                t = str(part.get("text") or "")
+                if t.strip():
+                    text_parts.append(t)
+
+        prefix = "\n\n".join(enriched_parts)
+        user_text = "\n\n".join(text_parts)
+        if prefix and user_text:
+            return f"{prefix}\n\n{user_text}"
+        if prefix:
+            return prefix
+        return user_text or ""
+
+    # ------------------------------------------------------------------
     # HTTP Handlers
     # ------------------------------------------------------------------
 
@@ -999,6 +1164,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 {"error": {"message": "No user message found in messages", "type": "invalid_request_error"}},
                 status=400,
             )
+
+        user_message = await self._apply_image_routing(user_message)
 
         # Allow caller to scope long-term memory (e.g. Honcho) with a
         # stable per-channel identifier via X-Hermes-Session-Key.  This
@@ -2065,6 +2232,8 @@ class APIServerAdapter(BasePlatformAdapter):
         user_message: Any = input_messages[-1].get("content", "") if input_messages else ""
         if not _content_has_visible_payload(user_message):
             return web.json_response(_openai_error("No user message found in input"), status=400)
+
+        user_message = await self._apply_image_routing(user_message)
 
         # Truncation support
         if body.get("truncation") == "auto" and len(conversation_history) > 100:
