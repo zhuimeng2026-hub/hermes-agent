@@ -10,12 +10,55 @@ Tools:
 import json
 import logging
 import asyncio
+from datetime import datetime, time
 from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 
 logger = logging.getLogger("stock_mcp")
+
+# A股交易时段（北京时间）
+_TRADING_MORNING_START = time(9, 30)
+_TRADING_MORNING_END = time(11, 30)
+_TRADING_AFTERNOON_START = time(13, 0)
+_TRADING_AFTERNOON_END = time(15, 0)
+
+
+def _is_trading_hours() -> bool:
+    now = datetime.now()
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    t = now.time()
+    if _TRADING_MORNING_START <= t <= _TRADING_MORNING_END:
+        return True
+    if _TRADING_AFTERNOON_START <= t <= _TRADING_AFTERNOON_END:
+        return True
+    return False
+
+
+def _error_message(e: Exception, context: str = "") -> str:
+    """将异常映射为用户友好的结构化提示，供 LLM 准确理解错误原因。"""
+    if isinstance(e, httpx.TimeoutException):
+        return "股票数据请求超时，当前网络可能不稳定或 Eastmoney 接口响应较慢"
+    if isinstance(e, httpx.ConnectError):
+        return "暂时无法连接股票数据服务器，请稍后重试"
+    if isinstance(e, httpx.HTTPStatusError):
+        status = e.response.status_code
+        if status == 404:
+            return "未找到该股票数据，可能代码有误或已下市"
+        if status in (502, 503, 504):
+            return "股票数据服务器暂时不可用（网关异常），请稍后重试"
+        if status == 403:
+            return "股票数据接口访问被拒绝，请稍后重试"
+        return f"股票数据接口返回错误（HTTP {status}），请稍后重试"
+    if "certificate" in str(e).lower() or "ssl" in str(e).lower():
+        return "SSL 证书错误，请稍后重试"
+    # 未知异常，附带上下文判断是否可能为休市
+    if not _is_trading_hours():
+        return "当前非交易时段，行情数据暂停服务（非交易时间：工作日 9:30-11:30 / 13:00-15:00）"
+    return f"股票数据获取失败：{type(e).__name__} {str(e)}"
+
 
 mcp = FastMCP("stock-mcp")
 
@@ -134,7 +177,7 @@ async def stock_price(codes: str) -> str:
             })
         return json.dumps({"success": True, "count": len(stocks), "stocks": stocks}, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"success": False, "message": str(e)}, ensure_ascii=False)
+        return json.dumps({"success": False, "message": _error_message(e)}, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -177,7 +220,7 @@ async def stock_kline(code: str, period: str = "daily", count: int = 60) -> str:
                 })
         return json.dumps({"code": code, "period": period, "count": len(klines), "bars": klines}, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"success": False, "message": str(e)}, ensure_ascii=False)
+        return json.dumps({"success": False, "message": _error_message(e)}, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------
