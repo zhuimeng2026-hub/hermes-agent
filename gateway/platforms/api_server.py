@@ -795,6 +795,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        extra_headers: Optional[dict] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -846,6 +847,7 @@ class APIServerAdapter(BasePlatformAdapter):
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
+            extra_headers=extra_headers,
         )
         return agent
 
@@ -1176,6 +1178,13 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
 
+        # Extract per-request headers to透传 to the model provider (e.g. X-User-Id for NewAPI)
+        extra_headers = {}
+        user_id = request.headers.get("X-User-Id", "").strip()
+        if user_id:
+            extra_headers["X-User-Id"] = user_id
+            logger.info("X-User-Id: %s", user_id)
+
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
         #
@@ -1311,6 +1320,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                extra_headers=extra_headers,
             ))
 
             return await self._write_sse_chat_completion(
@@ -1327,6 +1337,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                extra_headers=extra_headers,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2156,6 +2167,13 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
 
+        # Extract per-request headers to透传 to the model provider (e.g. X-User-Id for NewAPI)
+        extra_headers = {}
+        user_id = request.headers.get("X-User-Id", "").strip()
+        if user_id:
+            extra_headers["X-User-Id"] = user_id
+            logger.info("X-User-Id: %s", user_id)
+
         # Parse request body
         try:
             body = await request.json()
@@ -2310,6 +2328,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                extra_headers=extra_headers,
             ))
 
             response_id = f"resp_{uuid.uuid4().hex[:28]}"
@@ -2340,6 +2359,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=instructions,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                extra_headers=extra_headers,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2768,6 +2788,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        extra_headers: Optional[dict] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -2791,6 +2812,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
                 gateway_session_key=gateway_session_key,
+                extra_headers=extra_headers,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent

@@ -970,6 +970,7 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        extra_headers: dict = None,
     ):
         """
         Initialize the AI Agent.
@@ -1036,6 +1037,7 @@ class AIAgent:
         self._chat_type = chat_type
         self._thread_id = thread_id
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+        self._extra_headers = extra_headers or {}  # Per-request headers to透传 to provider
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -5902,6 +5904,11 @@ class AIAgent:
             and self._api_kwargs_have_image_parts(api_kwargs or {})
         ):
             request_kwargs["default_headers"] = self._copilot_headers_for_request(is_vision=True)
+        # Merge per-request extra_headers (e.g. X-User-Id from H5)
+        if self._extra_headers:
+            headers = request_kwargs.get("default_headers") or {}
+            headers = {**headers, **self._extra_headers}
+            request_kwargs["default_headers"] = headers
         return self._create_openai_client(request_kwargs, reason=reason, shared=False)
 
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
