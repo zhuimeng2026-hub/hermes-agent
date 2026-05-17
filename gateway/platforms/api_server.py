@@ -1111,6 +1111,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_events": {"method": "GET", "path": "/v1/runs/{run_id}/events"},
                 "run_stop": {"method": "POST", "path": "/v1/runs/{run_id}/stop"},
                 "admin_usage": {"method": "GET", "path": "/v1/admin/usage"},
+                "admin_quota_get": {"method": "GET", "path": "/v1/admin/quota/{user_id}"},
+                "admin_quota_set": {"method": "POST", "path": "/v1/admin/quota"},
             },
         })
 
@@ -1151,6 +1153,116 @@ class APIServerAdapter(BasePlatformAdapter):
         if not dashboard_path.is_file():
             return web.Response(text="Dashboard not found", status=404)
         return web.FileResponse(dashboard_path)
+
+    # ── Quota management ──────────────────────────────────────────────────
+
+    def _load_quota_config(self) -> dict:
+        """Load quota settings from config.yaml api_server.quota section."""
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            return (cfg.get("api_server") or {}).get("quota") or {}
+        except Exception:
+            return {}
+
+    def _check_quota(self, user_id: str) -> Optional[dict]:
+        """Check if *user_id* has remaining token quota.
+
+        Returns None if the request should proceed, or a dict with error
+        details (suitable for a 402 response) if the quota is exhausted.
+        """
+        if not user_id:
+            return None  # No user_id → no quota enforcement
+
+        quota_cfg = self._load_quota_config()
+        db = self._ensure_session_db()
+
+        quota = db.get_user_quota(user_id)
+        if quota is None:
+            auto_assign = quota_cfg.get("auto_assign_free", True)
+            free_tokens = quota_cfg.get("free_tokens", 100000)
+            if auto_assign and free_tokens > 0:
+                quota = db.set_user_quota(user_id, free_quota=free_tokens, mode="set")
+            else:
+                return None  # No quota configured → allow
+
+        total = (quota.get("total_quota") or 0)
+        if total <= 0:
+            return None  # Zero quota means unlimited
+
+        used = db.get_user_usage_tokens(user_id)
+        if used >= total:
+            return {
+                "message": "Token quota exhausted",
+                "type": "quota_exhausted",
+                "user_id": user_id,
+                "used_tokens": used,
+                "total_quota": total,
+                "upgrade_url": quota_cfg.get("upgrade_url", ""),
+            }
+        return None
+
+    async def _handle_get_quota(self, request: "web.Request") -> "web.Response":
+        """GET /v1/admin/quota/{user_id} — query a user's quota and usage."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        user_id = request.match_info.get("user_id", "").strip()
+        if not user_id:
+            return web.json_response({"error": "user_id required"}, status=400)
+
+        db = self._ensure_session_db()
+        quota = db.get_user_quota(user_id)
+        if quota is None:
+            return web.json_response({"error": "No quota record", "user_id": user_id}, status=404)
+
+        used = db.get_user_usage_tokens(user_id)
+        total = quota.get("total_quota") or 0
+        return web.json_response({
+            "user_id": user_id,
+            "total_quota": total,
+            "free_quota": quota.get("free_quota") or 0,
+            "paid_quota": quota.get("paid_quota") or 0,
+            "used_tokens": used,
+            "remaining_tokens": max(total - used, 0) if total > 0 else -1,
+            "exhausted": total > 0 and used >= total,
+        })
+
+    async def _handle_set_quota(self, request: "web.Request") -> "web.Response":
+        """POST /v1/admin/quota — create or update a user's quota."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        user_id = (body.get("user_id") or "").strip()
+        if not user_id:
+            return web.json_response({"error": "user_id required"}, status=400)
+
+        free_quota = int(body.get("free_quota", 0))
+        paid_quota = int(body.get("paid_quota", 0))
+        mode = body.get("mode", "set")
+        if mode not in ("set", "add"):
+            return web.json_response({"error": "mode must be 'set' or 'add'"}, status=400)
+
+        db = self._ensure_session_db()
+        quota = db.set_user_quota(user_id, free_quota=free_quota, paid_quota=paid_quota, mode=mode)
+
+        used = db.get_user_usage_tokens(user_id)
+        total = quota.get("total_quota") or 0
+        return web.json_response({
+            "user_id": user_id,
+            "total_quota": total,
+            "free_quota": quota.get("free_quota") or 0,
+            "paid_quota": quota.get("paid_quota") or 0,
+            "used_tokens": used,
+            "remaining_tokens": max(total - used, 0) if total > 0 else -1,
+        })
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
@@ -1225,6 +1337,11 @@ class APIServerAdapter(BasePlatformAdapter):
         if user_id:
             extra_headers["X-User-Id"] = user_id
             logger.info("X-User-Id: %s", user_id)
+
+        # Quota enforcement
+        quota_err = self._check_quota(user_id)
+        if quota_err:
+            return web.json_response({"error": quota_err}, status=402)
 
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
@@ -2214,6 +2331,11 @@ class APIServerAdapter(BasePlatformAdapter):
         if user_id:
             extra_headers["X-User-Id"] = user_id
             logger.info("X-User-Id: %s", user_id)
+
+        # Quota enforcement
+        quota_err = self._check_quota(user_id)
+        if quota_err:
+            return web.json_response({"error": quota_err}, status=402)
 
         # Parse request body
         try:
@@ -3345,6 +3467,9 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
             # Admin: per-user usage statistics
             self._app.router.add_get("/v1/admin/usage", self._handle_admin_usage)
+            # Admin: user quota management
+            self._app.router.add_get("/v1/admin/quota/{user_id}", self._handle_get_quota)
+            self._app.router.add_post("/v1/admin/quota", self._handle_set_quota)
             # Dashboard UI
             self._app.router.add_get("/dashboard", self._handle_dashboard)
             # Start background sweep to clean up orphaned (unconsumed) run streams

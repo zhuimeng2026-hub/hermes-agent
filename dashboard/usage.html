@@ -35,10 +35,7 @@ body {
   flex-wrap: wrap;
   gap: 12px;
 }
-.header h1 {
-  font-size: 20px;
-  font-weight: 600;
-}
+.header h1 { font-size: 20px; font-weight: 600; }
 .header h1 span { color: var(--accent-light); }
 
 .controls {
@@ -56,9 +53,7 @@ body {
   font-size: 14px;
   outline: none;
 }
-.controls select:focus, .controls input:focus {
-  border-color: var(--accent);
-}
+.controls select:focus, .controls input:focus { border-color: var(--accent); }
 .controls button {
   background: var(--accent);
   color: #fff;
@@ -119,11 +114,9 @@ body {
   border-radius: 12px;
 }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
+.table-scroll { overflow-x: auto; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 800px; }
 th {
   text-align: left;
   padding: 10px 14px;
@@ -141,8 +134,8 @@ th {
   white-space: nowrap;
 }
 th:hover { color: var(--text); }
-th.sorted-asc::after { content: ' ▲'; font-size: 10px; }
-th.sorted-desc::after { content: ' ▼'; font-size: 10px; }
+th.sorted-asc::after { content: ' \25B2'; font-size: 10px; }
+th.sorted-desc::after { content: ' \25BC'; font-size: 10px; }
 
 td {
   padding: 10px 14px;
@@ -151,6 +144,8 @@ td {
 }
 tr:last-child td { border-bottom: none; }
 tr:hover { background: rgba(108, 92, 231, 0.05); }
+tr.exhausted { background: rgba(225, 112, 85, 0.08); }
+tr.exhausted:hover { background: rgba(225, 112, 85, 0.14); }
 
 .user-id {
   font-family: 'SF Mono', 'Fira Code', monospace;
@@ -163,6 +158,21 @@ tr:hover { background: rgba(108, 92, 231, 0.05); }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .cost { color: var(--green); }
 .last-active { color: var(--text-secondary); font-size: 12px; }
+.quota-exhausted { color: var(--red); font-weight: 600; }
+.quota-ok { color: var(--green); }
+.quota-unlimited { color: var(--text-secondary); font-style: italic; }
+
+.btn-sm {
+  background: var(--border);
+  color: var(--text);
+  border: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.btn-sm:hover { background: var(--accent); }
 
 .empty {
   text-align: center;
@@ -196,6 +206,60 @@ tr:hover { background: rgba(108, 92, 231, 0.05); }
   border-radius: 12px;
   margin-bottom: 20px;
 }
+
+/* Modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.active { display: flex; }
+.modal {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  width: 90%;
+  max-width: 380px;
+}
+.modal h3 { margin-bottom: 16px; font-size: 16px; }
+.modal label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  margin-top: 12px;
+}
+.modal input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  outline: none;
+}
+.modal input:focus { border-color: var(--accent); }
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 20px;
+  justify-content: flex-end;
+}
+.modal-actions button {
+  padding: 8px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  border: none;
+}
+.modal-actions .btn-cancel { background: var(--border); color: var(--text); }
+.modal-actions .btn-save { background: var(--accent); color: #fff; }
 
 @media (max-width: 600px) {
   body { padding: 12px; }
@@ -232,8 +296,28 @@ tr:hover { background: rgba(108, 92, 231, 0.05); }
     <h2>Per-User Usage</h2>
     <span class="count" id="user-count">0 users</span>
   </div>
-  <div id="table-body">
+  <div class="table-scroll" id="table-body">
     <div class="loading"><div class="spinner"></div><div>Loading...</div></div>
+  </div>
+</div>
+
+<!-- Quota Modal -->
+<div class="modal-overlay" id="quota-modal">
+  <div class="modal">
+    <h3>Set Quota: <span id="modal-user-id" style="color:var(--accent-light)"></span></h3>
+    <label>Free quota (tokens)</label>
+    <input type="number" id="modal-free" min="0" placeholder="0">
+    <label>Paid quota (tokens)</label>
+    <input type="number" id="modal-paid" min="0" placeholder="0">
+    <label>Mode</label>
+    <select id="modal-mode" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:8px;font-size:14px;outline:none;margin-top:4px">
+      <option value="set">Set (overwrite)</option>
+      <option value="add">Add (increment)</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeModal()">Cancel</button>
+      <button class="btn-save" onclick="saveQuota()">Save</button>
+    </div>
   </div>
 </div>
 
@@ -242,6 +326,7 @@ const DEFAULT_API = location.origin;
 let sortKey = 'total_input';
 let sortDir = 'desc';
 let allUsers = [];
+let modalUserId = null;
 
 function getApiBase() {
   const v = document.getElementById('api-url').value.trim();
@@ -252,8 +337,16 @@ function getApiKey() {
   return document.getElementById('api-key').value.trim();
 }
 
+function authHeaders() {
+  const key = getApiKey();
+  const h = { 'Content-Type': 'application/json' };
+  if (key) h['Authorization'] = `Bearer ${key}`;
+  return h;
+}
+
 function fmt(n) {
   if (n == null) return '-';
+  if (n < 0) return 'unlimited';
   if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
@@ -291,13 +384,14 @@ function renderSummary(users) {
   const totalSessions = users.reduce((s, u) => s + (u.session_count || 0), 0);
   const totalTokens = users.reduce((s, u) => s + (u.total_input || 0) + (u.total_output || 0), 0);
   const totalCost = users.reduce((s, u) => s + (u.total_cost || 0), 0);
-  const totalCache = users.reduce((s, u) => s + (u.total_cache_read || 0), 0);
+  const exhausted = users.filter(u => u.quota_exhausted).length;
 
   document.getElementById('summary').innerHTML = `
     <div class="summary-card"><div class="value">${users.length}</div><div class="label">Users</div></div>
     <div class="summary-card"><div class="value">${fmt(totalSessions)}</div><div class="label">Sessions</div></div>
     <div class="summary-card"><div class="value">${fmt(totalTokens)}</div><div class="label">Tokens</div></div>
     <div class="summary-card"><div class="value">${fmtCost(totalCost)}</div><div class="label">Est. Cost</div></div>
+    <div class="summary-card"><div class="value" style="color:${exhausted > 0 ? 'var(--red)' : 'var(--green)'}">${exhausted}</div><div class="label">Quota Exhausted</div></div>
   `;
 }
 
@@ -308,8 +402,6 @@ function renderTable() {
     return sortDir === 'asc' ? va - vb : vb - va;
   });
 
-  const totalTokens = allUsers.reduce((s, u) => s + (u.total_input || 0) + (u.total_output || 0), 0) || 1;
-
   const columns = [
     { key: 'user_id', label: 'User', cls: 'user-id' },
     { key: 'session_count', label: 'Sessions', cls: 'num' },
@@ -317,18 +409,34 @@ function renderTable() {
     { key: 'total_output', label: 'Output', cls: 'num' },
     { key: 'total_cache_read', label: 'Cache', cls: 'num' },
     { key: 'total_cost', label: 'Cost', cls: 'num cost' },
+    { key: 'total_quota', label: 'Quota', cls: 'num' },
+    { key: 'remaining_tokens', label: 'Remaining', cls: 'num' },
     { key: 'last_active', label: 'Last Active', cls: 'last-active' },
+    { key: '_actions', label: '', cls: '' },
   ];
 
-  const thtml = columns.map(c => {
+  const thtml = columns.filter(c => c.key !== '_actions').map(c => {
     const cls = sortKey === c.key ? (sortDir === 'asc' ? 'sorted-asc' : 'sorted-desc') : '';
     return `<th class="${cls}" onclick="sortUsers('${c.key}')">${c.label}</th>`;
-  }).join('');
+  }).join('') + '<th></th>';
 
   const fmtVal = (u, c) => {
     if (c.key === 'user_id') return `<td class="${c.cls}" title="${u.user_id || ''}">${u.user_id || '-'}</td>`;
     if (c.key === 'total_cost') return `<td class="${c.cls}">${fmtCost(u[c.key])}</td>`;
     if (c.key === 'last_active') return `<td class="${c.cls}">${fmtTime(u[c.key])}</td>`;
+    if (c.key === 'total_quota') {
+      const q = u.total_quota || 0;
+      if (q <= 0) return `<td class="quota-unlimited">unlimited</td>`;
+      return `<td class="num">${fmt(q)}</td>`;
+    }
+    if (c.key === 'remaining_tokens') {
+      const q = u.total_quota || 0;
+      if (q <= 0) return `<td class="quota-unlimited">-</td>`;
+      const r = u.remaining_tokens ?? 0;
+      const cls = r <= 0 ? 'quota-exhausted' : 'quota-ok';
+      return `<td class="num ${cls}">${fmt(r)}</td>`;
+    }
+    if (c.key === '_actions') return `<td><button class="btn-sm" onclick="openQuotaModal('${u.user_id}',${u.free_quota||0},${u.paid_quota||0})">Quota</button></td>`;
     return `<td class="${c.cls}">${fmt(u[c.key])}</td>`;
   };
 
@@ -338,9 +446,87 @@ function renderTable() {
     return;
   }
 
-  const rows = sorted.map(u => `<tr>${columns.map(c => fmtVal(u, c)).join('')}</tr>`).join('');
+  const rows = sorted.map(u => {
+    const cls = u.quota_exhausted ? 'exhausted' : '';
+    return `<tr class="${cls}">${columns.map(c => fmtVal(u, c)).join('')}</tr>`;
+  }).join('');
   document.getElementById('table-body').innerHTML = `<table><thead><tr>${thtml}</tr></thead><tbody>${rows}</tbody></table>`;
   document.getElementById('user-count').textContent = allUsers.length + ' user' + (allUsers.length !== 1 ? 's' : '');
+}
+
+// ── Quota modal ──
+
+function openQuotaModal(userId, free, paid) {
+  modalUserId = userId;
+  document.getElementById('modal-user-id').textContent = userId;
+  document.getElementById('modal-free').value = free || '';
+  document.getElementById('modal-paid').value = paid || '';
+  document.getElementById('modal-mode').value = 'set';
+  document.getElementById('quota-modal').classList.add('active');
+}
+
+function closeModal() {
+  document.getElementById('quota-modal').classList.remove('active');
+  modalUserId = null;
+}
+
+async function saveQuota() {
+  if (!modalUserId) return;
+  const free = parseInt(document.getElementById('modal-free').value) || 0;
+  const paid = parseInt(document.getElementById('modal-paid').value) || 0;
+  const mode = document.getElementById('modal-mode').value;
+  const base = getApiBase();
+
+  try {
+    const resp = await fetch(`${base}/v1/admin/quota`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ user_id: modalUserId, free_quota: free, paid_quota: paid, mode }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${resp.status}`);
+    }
+    closeModal();
+    await fetchQuotas();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// Close modal on overlay click
+document.getElementById('quota-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+
+// ── Data fetching ──
+
+async function fetchQuotas() {
+  const base = getApiBase();
+  const headers = authHeaders();
+  // Fetch quota for each user
+  const promises = allUsers.map(async u => {
+    try {
+      const resp = await fetch(`${base}/v1/admin/quota/${encodeURIComponent(u.user_id)}`, { headers });
+      if (resp.ok) {
+        const q = await resp.json();
+        u.total_quota = q.total_quota || 0;
+        u.free_quota = q.free_quota || 0;
+        u.paid_quota = q.paid_quota || 0;
+        u.remaining_tokens = q.remaining_tokens ?? 0;
+        u.quota_exhausted = q.exhausted || false;
+      } else {
+        u.total_quota = 0;
+        u.remaining_tokens = 0;
+        u.quota_exhausted = false;
+      }
+    } catch {
+      u.total_quota = 0;
+      u.remaining_tokens = 0;
+      u.quota_exhausted = false;
+    }
+  });
+  await Promise.all(promises);
 }
 
 async function fetchData() {
@@ -349,21 +535,21 @@ async function fetchData() {
 
   const days = document.getElementById('days').value;
   const base = getApiBase();
-  const key = getApiKey();
-  const url = `${base}/v1/admin/usage?days=${days}`;
-
-  const headers = {};
-  if (key) headers['Authorization'] = `Bearer ${key}`;
+  const headers = authHeaders();
 
   try {
     document.getElementById('table-body').innerHTML = '<div class="loading"><div class="spinner"></div><div>Loading...</div></div>';
-    const resp = await fetch(url, { headers });
+    const resp = await fetch(`${base}/v1/admin/usage?days=${days}`, { headers });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.error?.message || `HTTP ${resp.status}`);
     }
     const data = await resp.json();
     allUsers = data.users || [];
+
+    // Enrich with quota data
+    await fetchQuotas();
+
     renderSummary(allUsers);
     renderTable();
   } catch (e) {

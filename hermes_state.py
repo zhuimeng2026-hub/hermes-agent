@@ -94,6 +94,15 @@ CREATE TABLE IF NOT EXISTS state_meta (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS user_quotas (
+    user_id TEXT PRIMARY KEY,
+    total_quota INTEGER NOT NULL DEFAULT 0,
+    free_quota INTEGER NOT NULL DEFAULT 0,
+    paid_quota INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
@@ -2186,6 +2195,68 @@ class SessionDB:
                 (key, value),
             )
         self._execute_write(_do)
+
+    # ── User Quota Management ────────────────────────────────────────────
+
+    def get_user_quota(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Return the quota record for *user_id*, or None if not set."""
+        row = self._conn.execute(
+            "SELECT user_id, total_quota, free_quota, paid_quota, created_at, updated_at "
+            "FROM user_quotas WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def set_user_quota(
+        self,
+        user_id: str,
+        free_quota: int = 0,
+        paid_quota: int = 0,
+        mode: str = "set",
+    ) -> Dict[str, Any]:
+        """Create or update a user's quota.
+
+        mode="set" — overwrite free_quota / paid_quota.
+        mode="add" — increment free_quota / paid_quota.
+
+        Returns the resulting quota record.
+        """
+        now = time.time()
+
+        def _do(conn):
+            if mode == "add":
+                conn.execute(
+                    """INSERT INTO user_quotas (user_id, free_quota, paid_quota, total_quota, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(user_id) DO UPDATE SET
+                           free_quota = free_quota + excluded.free_quota,
+                           paid_quota = paid_quota + excluded.paid_quota,
+                           total_quota = total_quota + excluded.total_quota,
+                           updated_at = excluded.updated_at""",
+                    (user_id, free_quota, paid_quota, free_quota + paid_quota, now, now),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO user_quotas (user_id, free_quota, paid_quota, total_quota, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(user_id) DO UPDATE SET
+                           free_quota = excluded.free_quota,
+                           paid_quota = excluded.paid_quota,
+                           total_quota = excluded.total_quota,
+                           updated_at = excluded.updated_at""",
+                    (user_id, free_quota, paid_quota, free_quota + paid_quota, now, now),
+                )
+        self._execute_write(_do)
+        return self.get_user_quota(user_id)
+
+    def get_user_usage_tokens(self, user_id: str) -> int:
+        """Return total consumed tokens (input + output) for *user_id*."""
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) as used "
+            "FROM sessions WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return (row["used"] if isinstance(row, sqlite3.Row) else row[0]) or 0
 
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in.
