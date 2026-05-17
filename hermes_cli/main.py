@@ -10006,6 +10006,11 @@ Examples:
         default=8000,
         help="Port for HTTP transports (default: 8000)",
     )
+    mcp_serve_p.add_argument(
+        "--mount-path",
+        default=None,
+        help="URL path prefix for SSE/HTTP mounts (e.g. '/hermes')",
+    )
     _add_accept_hooks_flag(mcp_serve_p)
 
     mcp_add_p = mcp_sub.add_parser(

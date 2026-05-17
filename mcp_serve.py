@@ -849,6 +849,7 @@ def run_mcp_server(
     transport: str = "stdio",
     host: str = "127.0.0.1",
     port: int = 8000,
+    mount_path: str | None = None,
 ) -> None:
     """Start the Hermes MCP server.
 
@@ -857,6 +858,7 @@ def run_mcp_server(
         transport: Transport to use — "stdio", "sse", or "streamable-http".
         host: Host to bind (HTTP transports only).
         port: Port to bind (HTTP transports only).
+        mount_path: Mount path prefix for SSE/HTTP transports (e.g. "/hermes").
     """
     if not _MCP_SERVER_AVAILABLE:
         print(
@@ -891,7 +893,7 @@ def run_mcp_server(
             if transport == "stdio":
                 await server.run_stdio_async()
             elif transport == "sse":
-                await server.run_sse_async()
+                await server.run_sse_async(mount_path)
             elif transport == "streamable-http":
                 await server.run_streamable_http_async()
         finally:
@@ -901,6 +903,8 @@ def run_mcp_server(
     if transport in ("sse", "streamable-http"):
         server.settings.host = host
         server.settings.port = port
+        if mount_path:
+            server.settings.sse_path = mount_path.rstrip("/") + "/sse"
 
     try:
         asyncio.run(_run())

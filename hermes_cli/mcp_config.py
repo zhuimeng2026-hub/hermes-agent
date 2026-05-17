@@ -749,6 +749,7 @@ def mcp_command(args):
             transport=getattr(args, "transport", "stdio"),
             host=getattr(args, "host", "127.0.0.1"),
             port=getattr(args, "port", 8000),
+            mount_path=getattr(args, "mount_path", None),
         )
         return
 
