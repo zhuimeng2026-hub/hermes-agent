@@ -334,6 +334,8 @@ def build_or_headers(or_config: dict | None = None) -> dict:
     falls back to reading config from disk via ``load_config()``.
     """
     headers = dict(_OR_HEADERS_BASE)
+    # Add X-User-Id header if set
+    headers.update(_get_user_id_header())
 
     # Resolve config from disk if not provided.
     if or_config is None:
