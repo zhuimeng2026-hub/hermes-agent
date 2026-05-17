@@ -2910,3 +2910,62 @@ class TestFTS5ToolCallMigration:
         finally:
             session_db.close()
 
+
+# =========================================================================
+# User quota — days & requests limits
+# =========================================================================
+
+class TestUserQuotaDaysRequests:
+    def test_set_and_get_quota_with_max_days_and_max_requests(self, db):
+        quota = db.set_user_quota("u1", free_quota=5000, max_days=7, max_requests=100)
+        assert quota["max_days"] == 7
+        assert quota["max_requests"] == 100
+        assert quota["free_quota"] == 5000
+
+        fetched = db.get_user_quota("u1")
+        assert fetched["max_days"] == 7
+        assert fetched["max_requests"] == 100
+
+    def test_set_quota_overwrites_max_days_and_max_requests(self, db):
+        db.set_user_quota("u1", max_days=7, max_requests=100)
+        db.set_user_quota("u1", max_days=30, max_requests=50, mode="set")
+        quota = db.get_user_quota("u1")
+        assert quota["max_days"] == 30
+        assert quota["max_requests"] == 50
+
+    def test_set_quota_add_mode_preserves_max_fields(self, db):
+        db.set_user_quota("u1", free_quota=1000, max_days=7, max_requests=100)
+        db.set_user_quota("u1", free_quota=500, mode="add")
+        quota = db.get_user_quota("u1")
+        assert quota["free_quota"] == 1500
+        assert quota["max_days"] == 7
+        assert quota["max_requests"] == 100
+
+    def test_touch_user_first_seen_sets_timestamp(self, db):
+        before = time.time()
+        db.touch_user_first_seen("u1")
+        after = time.time()
+
+        quota = db.get_user_quota("u1")
+        assert quota is not None
+        assert before <= quota["first_seen_at"] <= after
+
+    def test_touch_user_first_seen_is_idempotent(self, db):
+        db.touch_user_first_seen("u1")
+        first = db.get_user_quota("u1")["first_seen_at"]
+
+        time.sleep(0.01)
+        db.touch_user_first_seen("u1")
+        second = db.get_user_quota("u1")["first_seen_at"]
+
+        assert first == second
+
+    def test_count_user_requests(self, db):
+        db.create_session("s1", source="api_server", user_id="u1")
+        db.create_session("s2", source="api_server", user_id="u1")
+        db.create_session("s3", source="api_server", user_id="u2")
+
+        assert db.count_user_requests("u1") == 2
+        assert db.count_user_requests("u2") == 1
+        assert db.count_user_requests("u999") == 0
+

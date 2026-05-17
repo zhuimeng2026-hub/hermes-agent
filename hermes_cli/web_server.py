@@ -15,6 +15,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -86,10 +87,18 @@ _REVEAL_WINDOW_SECONDS = 30
 # CORS: restrict to localhost origins only.  The web UI is intended to run
 # locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
 # read/modify config and secrets.
+# When HERMES_DASHBOARD_DOMAIN is set (reverse-proxy deployment), the public
+# origin is added so the browser can make cross-origin /api/ calls.
+
+_DASHBOARD_DOMAIN = os.environ.get("HERMES_DASHBOARD_DOMAIN", "").strip()
+
+_cors_origins = [r"localhost", r"127\.0\.0\.1"]
+if _DASHBOARD_DOMAIN:
+    _cors_origins.append(re.escape(_DASHBOARD_DOMAIN))
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=r"^https?://(" + "|".join(_cors_origins) + r")(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -209,6 +218,13 @@ async def host_header_middleware(request: Request, call_next):
     if bound_host:
         host_header = request.headers.get("host", "")
         if not _is_accepted_host(host_header, bound_host):
+            # Behind a reverse proxy the Host header will be the public
+            # domain (e.g. hermes.aixifs.com), not the loopback address
+            # we bound to.  Accept it when HERMES_DASHBOARD_DOMAIN matches.
+            if _DASHBOARD_DOMAIN:
+                proxy_host = host_header.strip().rsplit(":", 1)[0] if ":" in host_header else host_header.strip()
+                if proxy_host.lower() == _DASHBOARD_DOMAIN.lower():
+                    return await call_next(request)
             return JSONResponse(
                 status_code=400,
                 content={

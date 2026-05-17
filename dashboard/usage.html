@@ -116,7 +116,7 @@ body {
 
 .table-scroll { overflow-x: auto; }
 
-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 800px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 1200px; }
 th {
   text-align: left;
   padding: 10px 14px;
@@ -282,7 +282,6 @@ tr.exhausted:hover { background: rgba(225, 112, 85, 0.14); }
       <option value="365">1 year</option>
     </select>
     <input id="api-url" type="text" placeholder="API URL" style="width:180px">
-    <input id="api-key" type="password" placeholder="API Key" style="width:140px">
     <button onclick="fetchData()">Refresh</button>
   </div>
 </div>
@@ -309,6 +308,10 @@ tr.exhausted:hover { background: rgba(225, 112, 85, 0.14); }
     <input type="number" id="modal-free" min="0" placeholder="0">
     <label>Paid quota (tokens)</label>
     <input type="number" id="modal-paid" min="0" placeholder="0">
+    <label>Max usage days (0 = unlimited)</label>
+    <input type="number" id="modal-max-days" min="0" placeholder="0">
+    <label>Max requests (0 = unlimited)</label>
+    <input type="number" id="modal-max-requests" min="0" placeholder="0">
     <label>Mode</label>
     <select id="modal-mode" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:8px;font-size:14px;outline:none;margin-top:4px">
       <option value="set">Set (overwrite)</option>
@@ -334,13 +337,13 @@ function getApiBase() {
 }
 
 function getApiKey() {
-  return document.getElementById('api-key').value.trim();
+  return 'HDLMgsDz9VdPlnNr';
 }
 
 function authHeaders() {
   const key = getApiKey();
   const h = { 'Content-Type': 'application/json' };
-  if (key) h['Authorization'] = `Bearer ${key}`;
+  if (key) h['X-Api-Key'] = key;
   return h;
 }
 
@@ -385,13 +388,17 @@ function renderSummary(users) {
   const totalTokens = users.reduce((s, u) => s + (u.total_input || 0) + (u.total_output || 0), 0);
   const totalCost = users.reduce((s, u) => s + (u.total_cost || 0), 0);
   const exhausted = users.filter(u => u.quota_exhausted).length;
+  const expired = users.filter(u => u.max_days > 0 && u.days_remaining != null && u.days_remaining <= 0).length;
+  const reqExhausted = users.filter(u => u.max_requests > 0 && (u.requests_used || 0) >= u.max_requests).length;
 
   document.getElementById('summary').innerHTML = `
     <div class="summary-card"><div class="value">${users.length}</div><div class="label">Users</div></div>
     <div class="summary-card"><div class="value">${fmt(totalSessions)}</div><div class="label">Sessions</div></div>
     <div class="summary-card"><div class="value">${fmt(totalTokens)}</div><div class="label">Tokens</div></div>
     <div class="summary-card"><div class="value">${fmtCost(totalCost)}</div><div class="label">Est. Cost</div></div>
-    <div class="summary-card"><div class="value" style="color:${exhausted > 0 ? 'var(--red)' : 'var(--green)'}">${exhausted}</div><div class="label">Quota Exhausted</div></div>
+    <div class="summary-card"><div class="value" style="color:${exhausted > 0 ? 'var(--red)' : 'var(--green)'}">${exhausted}</div><div class="label">Token Exhausted</div></div>
+    <div class="summary-card"><div class="value" style="color:${expired > 0 ? 'var(--red)' : 'var(--green)'}">${expired}</div><div class="label">Days Expired</div></div>
+    <div class="summary-card"><div class="value" style="color:${reqExhausted > 0 ? 'var(--red)' : 'var(--green)'}">${reqExhausted}</div><div class="label">Reqs Exhausted</div></div>
   `;
 }
 
@@ -409,8 +416,12 @@ function renderTable() {
     { key: 'total_output', label: 'Output', cls: 'num' },
     { key: 'total_cache_read', label: 'Cache', cls: 'num' },
     { key: 'total_cost', label: 'Cost', cls: 'num cost' },
-    { key: 'total_quota', label: 'Quota', cls: 'num' },
+    { key: 'total_quota', label: 'Token Quota', cls: 'num' },
     { key: 'remaining_tokens', label: 'Remaining', cls: 'num' },
+    { key: 'max_days', label: 'Days Limit', cls: 'num' },
+    { key: 'days_remaining', label: 'Days Left', cls: 'num' },
+    { key: 'max_requests', label: 'Req Limit', cls: 'num' },
+    { key: 'requests_used', label: 'Reqs Used', cls: 'num' },
     { key: 'last_active', label: 'Last Active', cls: 'last-active' },
     { key: '_actions', label: '', cls: '' },
   ];
@@ -436,7 +447,30 @@ function renderTable() {
       const cls = r <= 0 ? 'quota-exhausted' : 'quota-ok';
       return `<td class="num ${cls}">${fmt(r)}</td>`;
     }
-    if (c.key === '_actions') return `<td><button class="btn-sm" onclick="openQuotaModal('${u.user_id}',${u.free_quota||0},${u.paid_quota||0})">Quota</button></td>`;
+    if (c.key === 'max_days') {
+      const v = u.max_days || 0;
+      return `<td class="${v > 0 ? 'num' : 'quota-unlimited'}">${v > 0 ? v + 'd' : '-'}</td>`;
+    }
+    if (c.key === 'days_remaining') {
+      const v = u.max_days || 0;
+      if (v <= 0) return `<td class="quota-unlimited">-</td>`;
+      const r = u.days_remaining;
+      if (r == null) return `<td class="quota-unlimited">-</td>`;
+      const cls = r <= 0 ? 'quota-exhausted' : 'quota-ok';
+      return `<td class="num ${cls}">${r}d</td>`;
+    }
+    if (c.key === 'max_requests') {
+      const v = u.max_requests || 0;
+      return `<td class="${v > 0 ? 'num' : 'quota-unlimited'}">${v > 0 ? fmt(v) : '-'}</td>`;
+    }
+    if (c.key === 'requests_used') {
+      const v = u.max_requests || 0;
+      if (v <= 0) return `<td class="quota-unlimited">-</td>`;
+      const used = u.requests_used || 0;
+      const cls = used >= v ? 'quota-exhausted' : 'num';
+      return `<td class="${cls}">${fmt(used)} / ${fmt(v)}</td>`;
+    }
+    if (c.key === '_actions') return `<td><button class="btn-sm" onclick="openQuotaModal('${u.user_id}')">Quota</button></td>`;
     return `<td class="${c.cls}">${fmt(u[c.key])}</td>`;
   };
 
@@ -456,11 +490,14 @@ function renderTable() {
 
 // ── Quota modal ──
 
-function openQuotaModal(userId, free, paid) {
+function openQuotaModal(userId) {
   modalUserId = userId;
+  const u = allUsers.find(x => x.user_id === userId) || {};
   document.getElementById('modal-user-id').textContent = userId;
-  document.getElementById('modal-free').value = free || '';
-  document.getElementById('modal-paid').value = paid || '';
+  document.getElementById('modal-free').value = u.free_quota || '';
+  document.getElementById('modal-paid').value = u.paid_quota || '';
+  document.getElementById('modal-max-days').value = u.max_days || '';
+  document.getElementById('modal-max-requests').value = u.max_requests || '';
   document.getElementById('modal-mode').value = 'set';
   document.getElementById('quota-modal').classList.add('active');
 }
@@ -474,6 +511,8 @@ async function saveQuota() {
   if (!modalUserId) return;
   const free = parseInt(document.getElementById('modal-free').value) || 0;
   const paid = parseInt(document.getElementById('modal-paid').value) || 0;
+  const maxDays = parseInt(document.getElementById('modal-max-days').value) || 0;
+  const maxRequests = parseInt(document.getElementById('modal-max-requests').value) || 0;
   const mode = document.getElementById('modal-mode').value;
   const base = getApiBase();
 
@@ -481,7 +520,14 @@ async function saveQuota() {
     const resp = await fetch(`${base}/v1/admin/quota`, {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ user_id: modalUserId, free_quota: free, paid_quota: paid, mode }),
+      body: JSON.stringify({
+        user_id: modalUserId,
+        free_quota: free,
+        paid_quota: paid,
+        max_days: maxDays,
+        max_requests: maxRequests,
+        mode,
+      }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
@@ -515,15 +561,30 @@ async function fetchQuotas() {
         u.paid_quota = q.paid_quota || 0;
         u.remaining_tokens = q.remaining_tokens ?? 0;
         u.quota_exhausted = q.exhausted || false;
+        u.max_days = q.max_days || 0;
+        u.max_requests = q.max_requests || 0;
+        u.first_seen_at = q.first_seen_at;
+        u.days_remaining = q.days_remaining;
+        u.requests_used = q.requests_used || 0;
       } else {
         u.total_quota = 0;
         u.remaining_tokens = 0;
         u.quota_exhausted = false;
+        u.max_days = 0;
+        u.max_requests = 0;
+        u.first_seen_at = null;
+        u.days_remaining = null;
+        u.requests_used = 0;
       }
     } catch {
       u.total_quota = 0;
       u.remaining_tokens = 0;
       u.quota_exhausted = false;
+      u.max_days = 0;
+      u.max_requests = 0;
+      u.first_seen_at = null;
+      u.days_remaining = null;
+      u.requests_used = 0;
     }
   });
   await Promise.all(promises);

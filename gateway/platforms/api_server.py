@@ -680,7 +680,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     def _check_auth(self, request: "web.Request") -> Optional["web.Response"]:
         """
-        Validate Bearer token from Authorization header.
+        Validate API key from Authorization: Bearer <key> or X-Api-Key header.
 
         Returns None if auth is OK, or a 401 web.Response on failure.
         If no API key is configured, all requests are allowed (only when API
@@ -694,6 +694,11 @@ class APIServerAdapter(BasePlatformAdapter):
             token = auth_header[7:].strip()
             if hmac.compare_digest(token, self._api_key):
                 return None  # Auth OK
+
+        # Also accept X-Api-Key (avoids conflict with nginx Basic auth)
+        x_api_key = request.headers.get("X-Api-Key", "")
+        if x_api_key and hmac.compare_digest(x_api_key, self._api_key):
+            return None  # Auth OK
 
         return web.json_response(
             {"error": {"message": "Invalid API key", "type": "invalid_request_error", "code": "invalid_api_key"}},
@@ -1154,6 +1159,13 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.Response(text="Dashboard not found", status=404)
         return web.FileResponse(dashboard_path)
 
+    async def _handle_quota_dashboard(self, request: "web.Request") -> "web.Response":
+        """GET /quota — serve the quota management dashboard HTML."""
+        dashboard_path = Path(__file__).resolve().parent.parent.parent / "dashboard" / "usage.html"
+        if not dashboard_path.is_file():
+            return web.Response(text="Dashboard not found", status=404)
+        return web.FileResponse(dashboard_path)
+
     # ── Quota management ──────────────────────────────────────────────────
 
     def _load_quota_config(self) -> dict:
@@ -1166,10 +1178,10 @@ class APIServerAdapter(BasePlatformAdapter):
             return {}
 
     def _check_quota(self, user_id: str) -> Optional[dict]:
-        """Check if *user_id* has remaining token quota.
+        """Check if *user_id* has remaining quota (tokens, days, requests).
 
         Returns None if the request should proceed, or a dict with error
-        details (suitable for a 402 response) if the quota is exhausted.
+        details (suitable for a 402 response) if any quota is exhausted.
         """
         if not user_id:
             return None  # No user_id → no quota enforcement
@@ -1177,29 +1189,67 @@ class APIServerAdapter(BasePlatformAdapter):
         quota_cfg = self._load_quota_config()
         db = self._ensure_session_db()
 
+        # Record first seen timestamp (idempotent)
+        db.touch_user_first_seen(user_id)
+
         quota = db.get_user_quota(user_id)
         if quota is None:
             auto_assign = quota_cfg.get("auto_assign_free", True)
             free_tokens = quota_cfg.get("free_tokens", 100000)
-            if auto_assign and free_tokens > 0:
-                quota = db.set_user_quota(user_id, free_quota=free_tokens, mode="set")
+            default_max_days = int(quota_cfg.get("default_max_days", 0))
+            default_max_requests = int(quota_cfg.get("default_max_requests", 0))
+            if auto_assign and (free_tokens > 0 or default_max_days > 0 or default_max_requests > 0):
+                quota = db.set_user_quota(
+                    user_id, free_quota=free_tokens, mode="set",
+                    max_days=default_max_days, max_requests=default_max_requests,
+                )
             else:
                 return None  # No quota configured → allow
 
+        # ── Token quota check ──────────────────────────────────────────
         total = (quota.get("total_quota") or 0)
-        if total <= 0:
-            return None  # Zero quota means unlimited
+        if total > 0:
+            used = db.get_user_usage_tokens(user_id)
+            if used >= total:
+                return {
+                    "message": "Token quota exhausted",
+                    "type": "quota_exhausted",
+                    "user_id": user_id,
+                    "used_tokens": used,
+                    "total_quota": total,
+                    "upgrade_url": quota_cfg.get("upgrade_url", ""),
+                }
 
-        used = db.get_user_usage_tokens(user_id)
-        if used >= total:
-            return {
-                "message": "Token quota exhausted",
-                "type": "quota_exhausted",
-                "user_id": user_id,
-                "used_tokens": used,
-                "total_quota": total,
-                "upgrade_url": quota_cfg.get("upgrade_url", ""),
-            }
+        # ── Usage period (days) check ──────────────────────────────────
+        max_days = int(quota.get("max_days") or 0)
+        if max_days > 0:
+            first_seen = quota.get("first_seen_at")
+            if first_seen:
+                elapsed_days = (time.time() - float(first_seen)) / 86400
+                if elapsed_days >= max_days:
+                    return {
+                        "message": "Usage period expired",
+                        "type": "usage_period_expired",
+                        "user_id": user_id,
+                        "max_days": max_days,
+                        "elapsed_days": round(elapsed_days, 1),
+                        "upgrade_url": quota_cfg.get("upgrade_url", ""),
+                    }
+
+        # ── Request count check ────────────────────────────────────────
+        max_requests = int(quota.get("max_requests") or 0)
+        if max_requests > 0:
+            request_count = db.count_user_requests(user_id)
+            if request_count >= max_requests:
+                return {
+                    "message": "Request quota exhausted",
+                    "type": "request_quota_exhausted",
+                    "user_id": user_id,
+                    "request_count": request_count,
+                    "max_requests": max_requests,
+                    "upgrade_url": quota_cfg.get("upgrade_url", ""),
+                }
+
         return None
 
     async def _handle_get_quota(self, request: "web.Request") -> "web.Response":
@@ -1219,6 +1269,16 @@ class APIServerAdapter(BasePlatformAdapter):
 
         used = db.get_user_usage_tokens(user_id)
         total = quota.get("total_quota") or 0
+        first_seen = quota.get("first_seen_at")
+        max_days = int(quota.get("max_days") or 0)
+        max_requests = int(quota.get("max_requests") or 0)
+        request_count = db.count_user_requests(user_id)
+
+        days_remaining = None
+        if max_days > 0 and first_seen:
+            elapsed = (time.time() - float(first_seen)) / 86400
+            days_remaining = max(0, round(max_days - elapsed, 1))
+
         return web.json_response({
             "user_id": user_id,
             "total_quota": total,
@@ -1227,6 +1287,11 @@ class APIServerAdapter(BasePlatformAdapter):
             "used_tokens": used,
             "remaining_tokens": max(total - used, 0) if total > 0 else -1,
             "exhausted": total > 0 and used >= total,
+            "max_days": max_days,
+            "max_requests": max_requests,
+            "first_seen_at": first_seen,
+            "days_remaining": days_remaining,
+            "requests_used": request_count,
         })
 
     async def _handle_set_quota(self, request: "web.Request") -> "web.Response":
@@ -1246,15 +1311,27 @@ class APIServerAdapter(BasePlatformAdapter):
 
         free_quota = int(body.get("free_quota", 0))
         paid_quota = int(body.get("paid_quota", 0))
+        max_days = int(body.get("max_days", 0))
+        max_requests = int(body.get("max_requests", 0))
         mode = body.get("mode", "set")
         if mode not in ("set", "add"):
             return web.json_response({"error": "mode must be 'set' or 'add'"}, status=400)
 
         db = self._ensure_session_db()
-        quota = db.set_user_quota(user_id, free_quota=free_quota, paid_quota=paid_quota, mode=mode)
+        quota = db.set_user_quota(
+            user_id, free_quota=free_quota, paid_quota=paid_quota,
+            mode=mode, max_days=max_days, max_requests=max_requests,
+        )
 
         used = db.get_user_usage_tokens(user_id)
         total = quota.get("total_quota") or 0
+        first_seen = quota.get("first_seen_at")
+        request_count = db.count_user_requests(user_id)
+        days_remaining = None
+        if max_days > 0 and first_seen:
+            elapsed = (time.time() - float(first_seen)) / 86400
+            days_remaining = max(0, round(max_days - elapsed, 1))
+
         return web.json_response({
             "user_id": user_id,
             "total_quota": total,
@@ -1262,6 +1339,11 @@ class APIServerAdapter(BasePlatformAdapter):
             "paid_quota": quota.get("paid_quota") or 0,
             "used_tokens": used,
             "remaining_tokens": max(total - used, 0) if total > 0 else -1,
+            "max_days": max_days,
+            "max_requests": max_requests,
+            "first_seen_at": first_seen,
+            "days_remaining": days_remaining,
+            "requests_used": request_count,
         })
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
@@ -3472,6 +3554,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/admin/quota", self._handle_set_quota)
             # Dashboard UI
             self._app.router.add_get("/dashboard", self._handle_dashboard)
+            self._app.router.add_get("/quota", self._handle_quota_dashboard)
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
             try:

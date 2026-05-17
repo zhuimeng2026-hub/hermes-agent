@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS user_quotas (
     total_quota INTEGER NOT NULL DEFAULT 0,
     free_quota INTEGER NOT NULL DEFAULT 0,
     paid_quota INTEGER NOT NULL DEFAULT 0,
+    max_days INTEGER NOT NULL DEFAULT 0,
+    max_requests INTEGER NOT NULL DEFAULT 0,
+    first_seen_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -2201,7 +2204,8 @@ class SessionDB:
     def get_user_quota(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Return the quota record for *user_id*, or None if not set."""
         row = self._conn.execute(
-            "SELECT user_id, total_quota, free_quota, paid_quota, created_at, updated_at "
+            "SELECT user_id, total_quota, free_quota, paid_quota, "
+            "max_days, max_requests, first_seen_at, created_at, updated_at "
             "FROM user_quotas WHERE user_id = ?",
             (user_id,),
         ).fetchone()
@@ -2213,10 +2217,12 @@ class SessionDB:
         free_quota: int = 0,
         paid_quota: int = 0,
         mode: str = "set",
+        max_days: int = 0,
+        max_requests: int = 0,
     ) -> Dict[str, Any]:
         """Create or update a user's quota.
 
-        mode="set" — overwrite free_quota / paid_quota.
+        mode="set" — overwrite free_quota / paid_quota / max_days / max_requests.
         mode="add" — increment free_quota / paid_quota.
 
         Returns the resulting quota record.
@@ -2226,25 +2232,31 @@ class SessionDB:
         def _do(conn):
             if mode == "add":
                 conn.execute(
-                    """INSERT INTO user_quotas (user_id, free_quota, paid_quota, total_quota, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?)
+                    """INSERT INTO user_quotas (user_id, free_quota, paid_quota, total_quota,
+                       max_days, max_requests, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(user_id) DO UPDATE SET
                            free_quota = free_quota + excluded.free_quota,
                            paid_quota = paid_quota + excluded.paid_quota,
                            total_quota = total_quota + excluded.total_quota,
                            updated_at = excluded.updated_at""",
-                    (user_id, free_quota, paid_quota, free_quota + paid_quota, now, now),
+                    (user_id, free_quota, paid_quota, free_quota + paid_quota,
+                     max_days, max_requests, now, now),
                 )
             else:
                 conn.execute(
-                    """INSERT INTO user_quotas (user_id, free_quota, paid_quota, total_quota, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?)
+                    """INSERT INTO user_quotas (user_id, free_quota, paid_quota, total_quota,
+                       max_days, max_requests, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(user_id) DO UPDATE SET
                            free_quota = excluded.free_quota,
                            paid_quota = excluded.paid_quota,
                            total_quota = excluded.total_quota,
+                           max_days = excluded.max_days,
+                           max_requests = excluded.max_requests,
                            updated_at = excluded.updated_at""",
-                    (user_id, free_quota, paid_quota, free_quota + paid_quota, now, now),
+                    (user_id, free_quota, paid_quota, free_quota + paid_quota,
+                     max_days, max_requests, now, now),
                 )
         self._execute_write(_do)
         return self.get_user_quota(user_id)
@@ -2257,6 +2269,29 @@ class SessionDB:
             (user_id,),
         ).fetchone()
         return (row["used"] if isinstance(row, sqlite3.Row) else row[0]) or 0
+
+    def touch_user_first_seen(self, user_id: str) -> None:
+        """Record first_seen_at for *user_id* if not already set. Idempotent."""
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO user_quotas (user_id, first_seen_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       first_seen_at = COALESCE(user_quotas.first_seen_at, excluded.first_seen_at),
+                       updated_at = excluded.updated_at""",
+                (user_id, now, now, now),
+            )
+        self._execute_write(_do)
+
+    def count_user_requests(self, user_id: str) -> int:
+        """Return total session count for *user_id*."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return (row[0] if isinstance(row, (tuple, list)) else row["count(*)"]) or 0
 
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in.

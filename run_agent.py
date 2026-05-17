@@ -2239,7 +2239,7 @@ class AIAgent:
                 model=self.model,
                 model_config=self._session_init_model_config,
                 system_prompt=self._cached_system_prompt,
-                user_id=None,
+                user_id=self._user_id,
                 parent_session_id=self._parent_session_id,
             )
             self._session_db_created = True
@@ -9309,6 +9309,7 @@ class AIAgent:
                     source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                     model=self.model,
                     model_config=self._session_init_model_config,
+                    user_id=self._user_id,
                     parent_session_id=old_session_id,
                 )
                 self._session_db_created = True
