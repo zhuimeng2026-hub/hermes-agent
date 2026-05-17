@@ -204,6 +204,33 @@ class InsightsEngine:
             cursor = self._conn.execute(self._GET_SESSIONS_ALL, (cutoff,))
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_user_usage(self, days: int = 30, source: str = "api_server") -> List[Dict[str, Any]]:
+        """Per-user token/cost aggregation for sessions with a user_id.
+
+        Returns a list of dicts sorted by total tokens descending, each
+        containing: user_id, session_count, total_input, total_output,
+        total_cache_read, total_cache_write, total_cost, last_active.
+        """
+        cutoff = time.time() - (days * 86400)
+        rows = self._conn.execute(
+            """SELECT user_id,
+                      COUNT(*) as session_count,
+                      COALESCE(SUM(input_tokens), 0) as total_input,
+                      COALESCE(SUM(output_tokens), 0) as total_output,
+                      COALESCE(SUM(cache_read_tokens), 0) as total_cache_read,
+                      COALESCE(SUM(cache_write_tokens), 0) as total_cache_write,
+                      COALESCE(SUM(estimated_cost_usd), 0) as total_cost,
+                      MAX(started_at) as last_active
+               FROM sessions
+               WHERE user_id IS NOT NULL
+                 AND started_at > ?
+                 AND (? IS NULL OR source = ?)
+               GROUP BY user_id
+               ORDER BY total_input + total_output DESC""",
+            (cutoff, source, source),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def _get_tool_usage(self, cutoff: float, source: str = None) -> List[Dict]:
         """Get tool call counts from messages.
 

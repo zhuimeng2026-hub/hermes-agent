@@ -29,6 +29,7 @@ import hmac
 import json
 import logging
 import os
+from pathlib import Path
 import socket as _socket
 import re
 import sqlite3
@@ -839,6 +840,7 @@ class APIServerAdapter(BasePlatformAdapter):
             enabled_toolsets=enabled_toolsets,
             session_id=session_id,
             platform="api_server",
+            user_id=(extra_headers or {}).get("X-User-Id"),
             stream_delta_callback=stream_delta_callback,
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
@@ -1108,8 +1110,47 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_status": {"method": "GET", "path": "/v1/runs/{run_id}"},
                 "run_events": {"method": "GET", "path": "/v1/runs/{run_id}/events"},
                 "run_stop": {"method": "POST", "path": "/v1/runs/{run_id}/stop"},
+                "admin_usage": {"method": "GET", "path": "/v1/admin/usage"},
             },
         })
+
+    async def _handle_admin_usage(self, request: "web.Request") -> "web.Response":
+        """GET /v1/admin/usage — per-user token/cost aggregation.
+
+        Query params:
+            days   — lookback window (default 30)
+            source — session source filter (default "api_server", pass "" for all)
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            from agent.insights import InsightsEngine
+        except ImportError:
+            return web.json_response({"error": "insights module not available"}, status=500)
+
+        db = self._ensure_session_db()
+        engine = InsightsEngine(db)
+
+        days = int(request.query.get("days", "30"))
+        source_param = request.query.get("source", "api_server")
+        source = source_param if source_param else None
+
+        users = engine.get_user_usage(days=days, source=source)
+
+        return web.json_response({
+            "period_days": days,
+            "source": source or "all",
+            "users": users,
+        })
+
+    async def _handle_dashboard(self, request: "web.Request") -> "web.Response":
+        """GET /dashboard — serve the usage dashboard HTML."""
+        dashboard_path = Path(__file__).resolve().parent.parent.parent / "dashboard" / "usage.html"
+        if not dashboard_path.is_file():
+            return web.Response(text="Dashboard not found", status=404)
+        return web.FileResponse(dashboard_path)
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
@@ -3302,6 +3343,10 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
+            # Admin: per-user usage statistics
+            self._app.router.add_get("/v1/admin/usage", self._handle_admin_usage)
+            # Dashboard UI
+            self._app.router.add_get("/dashboard", self._handle_dashboard)
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
             try:
