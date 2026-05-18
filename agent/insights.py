@@ -207,6 +207,10 @@ class InsightsEngine:
     def get_user_usage(self, days: int = 30, source: str = "api_server") -> List[Dict[str, Any]]:
         """Per-user token/cost aggregation for sessions with a user_id.
 
+        Also merges users from ``user_quotas`` who have activity but no session
+        rows (e.g. when SessionDB initialisation failed).  These users appear
+        with zero-filled session stats and ``first_seen_at`` as ``last_active``.
+
         Returns a list of dicts sorted by total tokens descending, each
         containing: user_id, session_count, total_input, total_output,
         total_cache_read, total_cache_write, total_cost, last_active.
@@ -229,7 +233,35 @@ class InsightsEngine:
                ORDER BY total_input + total_output DESC""",
             (cutoff, source, source),
         ).fetchall()
-        return [dict(r) for r in rows]
+        results = [dict(r) for r in rows]
+        seen_ids = {r["user_id"] for r in results}
+
+        # Merge users from user_quotas who have activity (daily_query_count > 0
+        # or recently first-seen) but no session rows — covers the case where
+        # SessionDB initialisation failed but the agent still served requests.
+        orphan_rows = self._conn.execute(
+            """SELECT uq.user_id,
+                      0 as session_count,
+                      0 as total_input,
+                      0 as total_output,
+                      0 as total_cache_read,
+                      0 as total_cache_write,
+                      0.0 as total_cost,
+                      uq.first_seen_at as last_active
+               FROM user_quotas uq
+               WHERE (uq.daily_query_count > 0 OR uq.first_seen_at > ?)
+                 AND uq.user_id IS NOT NULL
+                 AND uq.user_id != ''
+               ORDER BY uq.first_seen_at DESC""",
+            (cutoff,),
+        ).fetchall()
+        for r in orphan_rows:
+            uid = r["user_id"]
+            if uid not in seen_ids:
+                results.append(dict(r))
+                seen_ids.add(uid)
+
+        return results
 
     def _get_tool_usage(self, cutoff: float, source: str = None) -> List[Dict]:
         """Get tool call counts from messages.

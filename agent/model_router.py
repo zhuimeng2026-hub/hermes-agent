@@ -25,7 +25,7 @@ COMPLEX_KEYWORDS = (
 # (provider, model) pairs
 ROUTE_TABLE: dict[tuple[str, str], tuple[str, str]] = {
     # (user_level, query_type) → (provider, model)
-    ("free", "simple"):  ("deepseek", "deepseek-v4-flash"),
+    ("free", "simple"):  ("custom", "MiniMax-M2.5"),
     ("free", "complex"): ("zhipu",    "glm-4.5"),
     ("vip",  "simple"):  ("deepseek", "deepseek-v4-flash"),
     ("vip",  "complex"): ("deepseek", "deepseek-v4-flash"),

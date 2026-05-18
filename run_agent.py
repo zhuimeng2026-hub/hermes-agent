@@ -2230,7 +2230,13 @@ class AIAgent:
 
     def _ensure_db_session(self) -> None:
         """Create session DB row on first use. Disables _session_db on failure."""
-        if self._session_db_created or not self._session_db:
+        if self._session_db_created:
+            return
+        if not self._session_db:
+            logger.warning(
+                "Session DB unavailable (session_db=None) — session %s will not be persisted",
+                self.session_id,
+            )
             return
         try:
             self._session_db.create_session(

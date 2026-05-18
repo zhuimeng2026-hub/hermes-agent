@@ -884,7 +884,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 from hermes_state import SessionDB
                 self._session_db = SessionDB()
             except Exception as e:
-                logger.debug("SessionDB unavailable for API server: %s", e)
+                logger.warning("SessionDB unavailable for API server: %s", e)
         return self._session_db
 
     # ------------------------------------------------------------------

@@ -1,0 +1,35 @@
+[Unit]
+Description=Hermes Agent Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/hermes-agent
+Environment="PATH=/opt/hermes-agent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStartPre=/bin/sh -c 'rm -f /root/.hermes/gateway.pid'
+ExecStart=/opt/hermes-agent/.venv/bin/python -m hermes_cli.main gateway run
+Restart=on-failure
+RestartSec=5s
+
+# Allow time for graceful shutdown
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-gateway
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/.hermes /opt/hermes-agent/logs
+ReadOnlyPaths=/opt/hermes-agent
+
+[Install]
+WantedBy=multi-user.target
