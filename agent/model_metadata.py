@@ -1346,13 +1346,15 @@ def get_model_context_length(
                     if provider != "lmstudio":
                         save_context_length(model, base_url, local_ctx)
                     return local_ctx
-            logger.info(
+            logger.warning(
                 "Could not detect context length for model %r at %s — "
-                "defaulting to %s tokens (probe-down). Set model.context_length "
+                "falling through to model registry. Set model.context_length "
                 "in config.yaml to override.",
-                model, base_url, f"{DEFAULT_FALLBACK_CONTEXT:,}",
+                model, base_url,
             )
-            return DEFAULT_FALLBACK_CONTEXT
+            # Fall through to step 5 (models.dev provider-aware lookups)
+            # instead of returning DEFAULT_FALLBACK_CONTEXT here.
+            # Custom endpoints like aikey don't report context_length in /models.
 
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)
     if provider == "anthropic" or (

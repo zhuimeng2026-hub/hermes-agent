@@ -2706,7 +2706,10 @@ class AIAgent:
                 aux_model,
                 base_url=aux_base_url,
                 api_key=aux_api_key,
-                config_context_length=getattr(self, "_aux_compression_context_length_config", None),
+                config_context_length=(
+                    getattr(self, "_aux_compression_context_length_config", None)
+                    or getattr(self, "_config_context_length", None)
+                ),
                 # Each model must be resolved with its own provider so that
                 # provider-specific paths (e.g. Bedrock static table, OpenRouter API)
                 # are invoked for the correct client, not inherited from the main model.
