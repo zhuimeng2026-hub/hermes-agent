@@ -1370,6 +1370,29 @@ class APIServerAdapter(BasePlatformAdapter):
             },
         })
 
+    async def _handle_bump_usage(self, request: "web.Request") -> "web.Response":
+        """POST /v1/user/bump-usage — record a query for usage tracking.
+
+        Lightweight endpoint called by frontends when queries bypass Hermes
+        (e.g. NewAPI direct path).  No auth required.
+        """
+        user_id = request.headers.get("X-User-Id", "").strip()
+        if not user_id:
+            return web.json_response({"code": 0, "msg": "no user_id, skipped"})
+
+        try:
+            db = self._ensure_session_db()
+            if db is not None:
+                user_role = "free"
+                state = db.get_user_daily_state(user_id)
+                if state:
+                    user_role = state.get("user_role", "free")
+                db.check_and_bump_daily_count(user_id, user_role)
+        except Exception:
+            logger.warning("bump-usage failed for %s", user_id, exc_info=True)
+
+        return web.json_response({"code": 0, "msg": "ok"})
+
     async def _bump_daily_count_async(self, user_id: str, user_role: str = "free") -> None:
         """Background coroutine — increment daily_query_count. Errors are logged, not raised."""
         try:
@@ -3689,6 +3712,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/admin/quota", self._handle_set_quota)
             # Public: daily query status for frontend
             self._app.router.add_get("/v1/user/daily-status", self._handle_daily_status)
+            # Public: usage tracking ping for queries that bypass Hermes
+            self._app.router.add_post("/v1/user/bump-usage", self._handle_bump_usage)
             # Dashboard UI
             self._app.router.add_get("/dashboard", self._handle_dashboard)
             self._app.router.add_get("/quota", self._handle_quota_dashboard)
