@@ -2298,7 +2298,20 @@ class SessionDB:
 
     # ── Daily Query Limit Management ─────────────────────────────────────
 
-    DAILY_LIMITS = {"free": 5, "vip": 100}
+    DAILY_LIMITS = {"free": 25, "vip": 500}
+
+    def resolve_daily_limit(self, user_id: str, user_role: str = "free") -> int:
+        """Return the daily query limit for *user_id*.
+
+        Priority: per-user max_requests > role-based DAILY_LIMITS > default (25).
+        """
+        row = self._conn.execute(
+            "SELECT max_requests FROM user_quotas WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if row and row["max_requests"] and int(row["max_requests"]) > 0:
+            return int(row["max_requests"])
+        return self.DAILY_LIMITS.get(user_role, 25)
 
     def get_user_daily_state(self, user_id: str) -> Dict[str, Any]:
         """Return {user_role, daily_query_count, last_query_date} for *user_id*.
@@ -2340,7 +2353,7 @@ class SessionDB:
         Failures are logged but not raised — the caller proceeds regardless.
         """
         today = time.strftime("%Y-%m-%d")
-        limit = self.DAILY_LIMITS.get(user_role, 5)
+        limit = self.resolve_daily_limit(user_id, user_role)
 
         def _do(conn):
             row = conn.execute(

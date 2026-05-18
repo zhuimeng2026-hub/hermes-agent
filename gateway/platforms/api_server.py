@@ -1273,7 +1273,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     # ── Daily Query Limit Management ─────────────────────────────────────
 
-    UPGRADE_MSG = "今日查询次数已用完，开通会员立享每日100次查询+专属研报解读功能"
+    UPGRADE_MSG = "今日查询次数已用完，开通会员立享每日500次查询+专属研报解读功能"
 
     def _enforce_daily_limit(self, user_id: str) -> tuple:
         """Enforce daily per-user query limits.
@@ -1308,7 +1308,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if last_date != today:
             current_count = 0
 
-        limit = {"free": 5, "vip": 100}.get(user_role, 5)
+        limit = db.resolve_daily_limit(user_id, user_role)
 
         if current_count >= limit:
             return (
@@ -1355,7 +1355,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if last_date != today:
             current_count = 0
 
-        limit = {"free": 5, "vip": 100}.get(user_role, 5)
+        limit = db.resolve_daily_limit(user_id, user_role)
         remaining = max(0, limit - current_count)
 
         return web.json_response({
