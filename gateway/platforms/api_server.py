@@ -1326,6 +1326,50 @@ class APIServerAdapter(BasePlatformAdapter):
         remaining = limit - (current_count + 1)
         return None, user_role, max(remaining, 0)
 
+    # ── Public daily status endpoint (for frontend to check remaining quota) ─
+
+    async def _handle_daily_status(self, request: "web.Request") -> "web.Response":
+        """GET /v1/user/daily-status — return daily remaining query count.
+
+        Reads X-User-Id header. No auth required (public endpoint).
+        Frontend calls this to show remaining queries before submitting.
+        """
+        user_id = request.headers.get("X-User-Id", "").strip()
+        if not user_id:
+            return web.json_response(
+                {"code": 401, "msg": "未登录，请先授权", "data": None}, status=401,
+            )
+
+        db = self._ensure_session_db()
+        if db is None:
+            return web.json_response(
+                {"code": 500, "msg": "服务暂不可用", "data": None}, status=500,
+            )
+
+        state = db.get_user_daily_state(user_id)
+        user_role = state["user_role"]
+        last_date = state["last_query_date"]
+        current_count = state["daily_query_count"]
+
+        today = time.strftime("%Y-%m-%d")
+        if last_date != today:
+            current_count = 0
+
+        limit = {"free": 5, "vip": 100}.get(user_role, 5)
+        remaining = max(0, limit - current_count)
+
+        return web.json_response({
+            "code": 0,
+            "msg": "ok",
+            "data": {
+                "user_id": user_id,
+                "user_role": user_role,
+                "daily_limit": limit,
+                "daily_used": current_count,
+                "daily_remaining": remaining,
+            },
+        })
+
     async def _bump_daily_count_async(self, user_id: str, user_role: str = "free") -> None:
         """Background coroutine — increment daily_query_count. Errors are logged, not raised."""
         try:
@@ -3643,6 +3687,8 @@ class APIServerAdapter(BasePlatformAdapter):
             # Admin: user quota management
             self._app.router.add_get("/v1/admin/quota/{user_id}", self._handle_get_quota)
             self._app.router.add_post("/v1/admin/quota", self._handle_set_quota)
+            # Public: daily query status for frontend
+            self._app.router.add_get("/v1/user/daily-status", self._handle_daily_status)
             # Dashboard UI
             self._app.router.add_get("/dashboard", self._handle_dashboard)
             self._app.router.add_get("/quota", self._handle_quota_dashboard)
