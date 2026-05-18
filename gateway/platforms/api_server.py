@@ -63,6 +63,25 @@ CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 
+# Per-user in-memory rate limiter — 3 requests per second
+_RATE_LIMIT_WINDOW_S = 1.0
+_RATE_LIMIT_MAX_REQUESTS = 3
+_rate_limit_map: Dict[str, List[float]] = {}
+
+
+def _check_rate_limit(user_id: str) -> bool:
+    """Return True if the request should be allowed, False if rate-limited."""
+    now = time.monotonic()
+    timestamps = _rate_limit_map.get(user_id, [])
+    cutoff = now - _RATE_LIMIT_WINDOW_S
+    timestamps = [t for t in timestamps if t > cutoff]
+    if len(timestamps) >= _RATE_LIMIT_MAX_REQUESTS:
+        _rate_limit_map[user_id] = timestamps
+        return False
+    timestamps.append(now)
+    _rate_limit_map[user_id] = timestamps
+    return True
+
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
     """Parse a listen port without letting malformed env/config values crash startup."""
@@ -395,12 +414,92 @@ class ResponseStore:
 
 
 # ---------------------------------------------------------------------------
+# Tushare client — direct HTTP API (bypasses unstable MCP gateway)
+# ---------------------------------------------------------------------------
+
+TUSHARE_API_URL = "http://api.tushare.pro"
+
+
+def _load_tushare_config() -> Optional[Dict[str, str]]:
+    """Extract tushare token from .mcp.json URL or TUSHARE_TOKEN env."""
+    env_token = os.getenv("TUSHARE_TOKEN", "")
+    if env_token:
+        return {"token": env_token, "url": TUSHARE_API_URL}
+
+    env_url = os.getenv("TUSHARE_MCP_URL", "")
+    source_url = env_url
+    if not source_url:
+        try:
+            from hermes_constants import get_hermes_home
+            mcp_file = get_hermes_home() / ".mcp.json"
+        except ImportError:
+            mcp_file = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / ".mcp.json"
+        try:
+            if mcp_file.exists():
+                data = json.loads(mcp_file.read_text())
+                servers = data.get("mcpServers", {})
+                tushare = servers.get("tushareMcp", {})
+                source_url = tushare.get("url", "")
+        except Exception:
+            pass
+
+    if not source_url:
+        return None
+
+    # Extract token from URL query string
+    from urllib.parse import urlparse, parse_qs
+    parsed = urlparse(source_url)
+    params = parse_qs(parsed.query)
+    token = params.get("token", [""])[0]
+    if not token:
+        return None
+    return {"token": token, "url": TUSHARE_API_URL}
+
+
+class TushareClient:
+    """Async client for calling tushare HTTP API directly."""
+
+    def __init__(self, token: str, url: str = TUSHARE_API_URL):
+        self._token: str = token
+        self._url: str = url
+
+    async def call(self, api_name: str, params: Dict[str, Any], fields: str = "") -> Dict[str, Any]:
+        import aiohttp
+
+        payload: Dict[str, Any] = {
+            "api_name": api_name,
+            "token": self._token,
+            "params": params,
+        }
+        if fields:
+            payload["fields"] = fields
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self._url, json=payload,
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    return {"error": f"tushare HTTP {resp.status}: {text[:500]}"}
+                return await resp.json()
+
+
+async def _get_tushare_client() -> Optional[TushareClient]:
+    """Factory: return a TushareClient if tushare is configured."""
+    config = _load_tushare_config()
+    if not config:
+        return None
+    return TushareClient(token=config["token"], url=config["url"])
+
+
+# ---------------------------------------------------------------------------
 # CORS middleware
 # ---------------------------------------------------------------------------
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-User-Id",
 }
 
 
@@ -802,6 +901,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
         extra_headers: Optional[dict] = None,
+        model_override: Optional[str] = None,
+        provider_override: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -835,8 +936,12 @@ class APIServerAdapter(BasePlatformAdapter):
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
         fallback_model = GatewayRunner._load_fallback_model()
 
+        # Pop provider from kwargs before passing to avoid double-provider
+        # when provider_override is set (short-circuit would skip the pop).
+        kwargs_provider = runtime_kwargs.pop("provider", None)
         agent = AIAgent(
-            model=model,
+            model=model_override or model,
+            provider=provider_override or kwargs_provider,
             **runtime_kwargs,
             max_iterations=max_iterations,
             quiet_mode=True,
@@ -1166,91 +1271,69 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.Response(text="Dashboard not found", status=404)
         return web.FileResponse(dashboard_path)
 
-    # ── Quota management ──────────────────────────────────────────────────
+    # ── Daily Query Limit Management ─────────────────────────────────────
 
-    def _load_quota_config(self) -> dict:
-        """Load quota settings from config.yaml api_server.quota section."""
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-            return (cfg.get("api_server") or {}).get("quota") or {}
-        except Exception:
-            return {}
+    UPGRADE_MSG = "今日查询次数已用完，开通会员立享每日100次查询+专属研报解读功能"
 
-    def _check_quota(self, user_id: str) -> Optional[dict]:
-        """Check if *user_id* has remaining quota (tokens, days, requests).
+    def _enforce_daily_limit(self, user_id: str) -> tuple:
+        """Enforce daily per-user query limits.
 
-        Returns None if the request should proceed, or a dict with error
-        details (suitable for a 402 response) if any quota is exhausted.
+        Returns (error_response, user_role, remaining_count).
+        - error_response is a web.Response on failure, None on success.
+        - user_role is the user's role string ('free' or 'vip').
+        - remaining_count is int on success, 0 on failure.
         """
         if not user_id:
-            return None  # No user_id → no quota enforcement
+            return (
+                web.json_response(
+                    {"code": 401, "msg": "未登录，请先授权", "data": None},
+                    status=401,
+                ),
+                "free", 0,
+            )
 
-        quota_cfg = self._load_quota_config()
         db = self._ensure_session_db()
+        if db is None:
+            logger.warning("SessionDB unavailable — allowing request for user %s", user_id)
+            return None, "free", -1
 
-        # Record first seen timestamp (idempotent)
-        db.touch_user_first_seen(user_id)
+        state = db.get_user_daily_state(user_id)
+        user_role = state["user_role"]
+        last_date = state["last_query_date"]
+        current_count = state["daily_query_count"]
 
-        quota = db.get_user_quota(user_id)
-        if quota is None:
-            auto_assign = quota_cfg.get("auto_assign_free", True)
-            free_tokens = quota_cfg.get("free_tokens", 100000)
-            default_max_days = int(quota_cfg.get("default_max_days", 0))
-            default_max_requests = int(quota_cfg.get("default_max_requests", 0))
-            if auto_assign and (free_tokens > 0 or default_max_days > 0 or default_max_requests > 0):
-                quota = db.set_user_quota(
-                    user_id, free_quota=free_tokens, mode="set",
-                    max_days=default_max_days, max_requests=default_max_requests,
-                )
-            else:
-                return None  # No quota configured → allow
+        today = time.strftime("%Y-%m-%d")
 
-        # ── Token quota check ──────────────────────────────────────────
-        total = (quota.get("total_quota") or 0)
-        if total > 0:
-            used = db.get_user_usage_tokens(user_id)
-            if used >= total:
-                return {
-                    "message": "Token quota exhausted",
-                    "type": "quota_exhausted",
-                    "user_id": user_id,
-                    "used_tokens": used,
-                    "total_quota": total,
-                    "upgrade_url": quota_cfg.get("upgrade_url", ""),
-                }
+        # Date-reset: new day → count starts fresh
+        if last_date != today:
+            current_count = 0
 
-        # ── Usage period (days) check ──────────────────────────────────
-        max_days = int(quota.get("max_days") or 0)
-        if max_days > 0:
-            first_seen = quota.get("first_seen_at")
-            if first_seen:
-                elapsed_days = (time.time() - float(first_seen)) / 86400
-                if elapsed_days >= max_days:
-                    return {
-                        "message": "Usage period expired",
-                        "type": "usage_period_expired",
-                        "user_id": user_id,
-                        "max_days": max_days,
-                        "elapsed_days": round(elapsed_days, 1),
-                        "upgrade_url": quota_cfg.get("upgrade_url", ""),
-                    }
+        limit = {"free": 5, "vip": 100}.get(user_role, 5)
 
-        # ── Request count check ────────────────────────────────────────
-        max_requests = int(quota.get("max_requests") or 0)
-        if max_requests > 0:
-            request_count = db.count_user_requests(user_id)
-            if request_count >= max_requests:
-                return {
-                    "message": "Request quota exhausted",
-                    "type": "request_quota_exhausted",
-                    "user_id": user_id,
-                    "request_count": request_count,
-                    "max_requests": max_requests,
-                    "upgrade_url": quota_cfg.get("upgrade_url", ""),
-                }
+        if current_count >= limit:
+            return (
+                web.json_response(
+                    {"code": 402, "msg": self.UPGRADE_MSG, "data": {"remaining_count": 0}},
+                    status=402,
+                ),
+                user_role, 0,
+            )
 
-        return None
+        # Pre-increment: count goes up before we run the agent.
+        # Fire-and-forget: DB failure is logged but doesn't block.
+        asyncio.ensure_future(self._bump_daily_count_async(user_id, user_role))
+
+        remaining = limit - (current_count + 1)
+        return None, user_role, max(remaining, 0)
+
+    async def _bump_daily_count_async(self, user_id: str, user_role: str = "free") -> None:
+        """Background coroutine — increment daily_query_count. Errors are logged, not raised."""
+        try:
+            db = self._ensure_session_db()
+            if db is not None:
+                db.check_and_bump_daily_count(user_id, user_role)
+        except Exception:
+            logger.warning("Failed to bump daily count for user %s", user_id, exc_info=True)
 
     async def _handle_get_quota(self, request: "web.Request") -> "web.Response":
         """GET /v1/admin/quota/{user_id} — query a user's quota and usage."""
@@ -1348,6 +1431,22 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
+
+        # ── Extract user identity from X-User-Id header ──────────────────
+        user_id = request.headers.get("X-User-Id", "").strip()
+
+        # ── Rate limiter: 3 req/s per user ──────────────────────────────
+        if user_id and not _check_rate_limit(user_id):
+            return web.json_response(
+                {"code": 500, "msg": "请求过于频繁，请稍后再试", "data": None}, status=429,
+            )
+
+        # ── Daily query limit enforcement ───────────────────────────────
+        limit_result, user_role, remaining_count = self._enforce_daily_limit(user_id)
+        if limit_result is not None:
+            return limit_result
+
+        # Auth check (API key, if configured)
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -1413,17 +1512,23 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
 
-        # Extract per-request headers to透传 to the model provider (e.g. X-User-Id for NewAPI)
+        # Pass X-User-Id through to the model provider
         extra_headers = {}
-        user_id = request.headers.get("X-User-Id", "").strip()
         if user_id:
             extra_headers["X-User-Id"] = user_id
-            logger.info("X-User-Id: %s", user_id)
 
-        # Quota enforcement
-        quota_err = self._check_quota(user_id)
-        if quota_err:
-            return web.json_response({"error": quota_err}, status=402)
+        # ── Model routing by user tier and query complexity ─────────────
+        model_override = None
+        provider_override = None
+        model_used = "default"
+        try:
+            from agent.model_router import classify_query, select_model
+            query_type = classify_query(user_message if isinstance(user_message, str) else "")
+            provider_override, model_override = select_model(user_role, query_type)
+            model_used = f"{provider_override}/{model_override}"
+            logger.info("Model routed: %s (tier=%s, type=%s)", model_used, user_role, query_type)
+        except Exception:
+            logger.debug("Model routing skipped", exc_info=True)
 
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
@@ -1561,6 +1666,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
                 extra_headers=extra_headers,
+                model_override=model_override,
+                provider_override=provider_override,
             ))
 
             return await self._write_sse_chat_completion(
@@ -1578,6 +1685,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
                 extra_headers=extra_headers,
+                model_override=model_override,
+                provider_override=provider_override,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -1597,7 +1706,7 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    {"code": 500, "msg": f"系统错误，请稍后重试", "data": None},
                     status=500,
                 )
 
@@ -1619,34 +1728,15 @@ class APIServerAdapter(BasePlatformAdapter):
                     "Please try again or rephrase your message."
                 )
 
-        response_data = {
-            "id": completion_id,
-            "object": "chat.completion",
-            "created": created,
-            "model": model_name,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": final_response,
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {
-                "prompt_tokens": usage.get("input_tokens", 0),
-                "completion_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("total_tokens", 0),
+        return web.json_response({
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "content": final_response,
+                "remaining_count": remaining_count if remaining_count >= 0 else None,
+                "model_used": model_used,
             },
-        }
-
-        response_headers = {
-            "X-Hermes-Session-Id": result.get("session_id", session_id),
-        }
-        if gateway_session_key:
-            response_headers["X-Hermes-Session-Key"] = gateway_session_key
-        return web.json_response(response_data, headers=response_headers)
+        })
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
@@ -2398,6 +2488,21 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_responses(self, request: "web.Request") -> "web.Response":
         """POST /v1/responses — OpenAI Responses API format."""
+
+        # ── Extract user identity from X-User-Id header ──────────────────
+        user_id = request.headers.get("X-User-Id", "").strip()
+
+        # ── Rate limiter: 3 req/s per user ──────────────────────────────
+        if user_id and not _check_rate_limit(user_id):
+            return web.json_response(
+                {"code": 500, "msg": "请求过于频繁，请稍后再试", "data": None}, status=429,
+            )
+
+        # ── Daily query limit enforcement ───────────────────────────────
+        limit_result, user_role, remaining_count = self._enforce_daily_limit(user_id)
+        if limit_result is not None:
+            return limit_result
+
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -2407,17 +2512,10 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
 
-        # Extract per-request headers to透传 to the model provider (e.g. X-User-Id for NewAPI)
+        # Pass X-User-Id through to the model provider
         extra_headers = {}
-        user_id = request.headers.get("X-User-Id", "").strip()
         if user_id:
             extra_headers["X-User-Id"] = user_id
-            logger.info("X-User-Id: %s", user_id)
-
-        # Quota enforcement
-        quota_err = self._check_quota(user_id)
-        if quota_err:
-            return web.json_response({"error": quota_err}, status=402)
 
         # Parse request body
         try:
@@ -2463,6 +2561,23 @@ class APIServerAdapter(BasePlatformAdapter):
                     input_messages.append({"role": role, "content": content})
         else:
             return web.json_response(_openai_error("'input' must be a string or array"), status=400)
+
+        # ── Model routing by user tier and query complexity ─────────────
+        model_override = None
+        provider_override = None
+        model_used = "default"
+        try:
+            from agent.model_router import classify_query, select_model
+            first_user_text = ""
+            for m in input_messages:
+                if m.get("role") == "user":
+                    first_user_text = m.get("content", "")
+                    break
+            query_type = classify_query(first_user_text if isinstance(first_user_text, str) else "")
+            provider_override, model_override = select_model(user_role, query_type)
+            model_used = f"{provider_override}/{model_override}"
+        except Exception:
+            logger.debug("Model routing skipped", exc_info=True)
 
         # Accept explicit conversation_history from the request body.
         # This lets stateless clients supply their own history instead of
@@ -2574,6 +2689,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
                 extra_headers=extra_headers,
+                model_override=model_override,
+                provider_override=provider_override,
             ))
 
             response_id = f"resp_{uuid.uuid4().hex[:28]}"
@@ -2605,6 +2722,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
                 extra_headers=extra_headers,
+                model_override=model_override,
+                provider_override=provider_override,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2627,7 +2746,7 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    {"code": 500, "msg": "系统错误，请稍后重试", "data": None},
                     status=500,
                 )
 
@@ -2649,54 +2768,15 @@ class APIServerAdapter(BasePlatformAdapter):
                     "Please try again or rephrase your message."
                 )
 
-        response_id = f"resp_{uuid.uuid4().hex[:28]}"
-        created_at = int(time.time())
-
-        # Build the full conversation history for storage
-        # (includes tool calls from the agent run)
-        full_history = list(conversation_history)
-        full_history.append({"role": "user", "content": user_message})
-        # Add agent's internal messages if available
-        agent_messages = result.get("messages", [])
-        if agent_messages:
-            full_history.extend(agent_messages)
-        else:
-            full_history.append({"role": "assistant", "content": final_response})
-
-        # Build output items (includes tool calls + final message)
-        output_items = self._extract_output_items(result)
-
-        response_data = {
-            "id": response_id,
-            "object": "response",
-            "status": "completed",
-            "created_at": created_at,
-            "model": body.get("model", self._model_name),
-            "output": output_items,
-            "usage": {
-                "input_tokens": usage.get("input_tokens", 0),
-                "output_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("total_tokens", 0),
+        return web.json_response({
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "content": final_response,
+                "remaining_count": remaining_count if remaining_count >= 0 else None,
+                "model_used": model_used,
             },
-        }
-
-        # Store the complete response object for future chaining / GET retrieval
-        if store:
-            self._response_store.put(response_id, {
-                "response": response_data,
-                "conversation_history": full_history,
-                "instructions": instructions,
-                "session_id": session_id,
-            })
-            # Update conversation mapping so the next request with the same
-            # conversation name automatically chains to this response
-            if conversation:
-                self._response_store.set_conversation(conversation, response_id)
-
-        response_headers = {"X-Hermes-Session-Id": session_id}
-        if gateway_session_key:
-            response_headers["X-Hermes-Session-Key"] = gateway_session_key
-        return web.json_response(response_data, headers=response_headers)
+        })
 
     # ------------------------------------------------------------------
     # GET / DELETE response endpoints
@@ -3034,6 +3114,8 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         extra_headers: Optional[dict] = None,
+        model_override: Optional[str] = None,
+        provider_override: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3058,6 +3140,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=tool_complete_callback,
                 gateway_session_key=gateway_session_key,
                 extra_headers=extra_headers,
+                model_override=model_override,
+                provider_override=provider_override,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent
@@ -3542,6 +3626,13 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            # Stock data API powered by tushare MCP
+            self._app.router.add_get("/api/stock/basic", self._handle_stock_basic)
+            self._app.router.add_get("/api/stock/daily", self._handle_stock_daily)
+            self._app.router.add_get("/api/stock/daily_basic", self._handle_stock_daily_basic)
+            self._app.router.add_get("/api/stock/income", self._handle_stock_income)
+            self._app.router.add_get("/api/stock/balancesheet", self._handle_stock_balancesheet)
+            self._app.router.add_get("/api/stock/cashflow", self._handle_stock_cashflow)
             # Structured event streaming
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
@@ -3623,6 +3714,79 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("[%s] Failed to start API server: %s", self.name, e)
             return False
+
+    # ------------------------------------------------------------------
+    # Stock data API handlers (tushare MCP)
+    # ------------------------------------------------------------------
+
+    async def _call_tushare(self, api_name: str, args: Dict[str, Any]) -> "web.Response":
+        """Call tushare HTTP API and return the result as a JSON response."""
+        config = _load_tushare_config()
+        if not config:
+            return web.json_response(
+                {"error": "tushare not configured. Add tushareMcp to .mcp.json or set TUSHARE_TOKEN"},
+                status=503,
+            )
+        client = TushareClient(token=config["token"])
+        # Separate fields from params — tushare API expects fields as a string
+        fields = args.pop("fields", "")
+        if isinstance(fields, list):
+            fields = ",".join(fields)
+        try:
+            result = await client.call(api_name, args, fields)
+        except Exception as e:
+            return web.json_response({"error": f"tushare call failed: {e}"}, status=502)
+        if result.get("code") != 0:
+            return web.json_response({"error": result.get("msg", "tushare API error"), "code": result.get("code")}, status=502)
+        return web.json_response(result)
+
+    @staticmethod
+    def _parse_stock_args(request: "web.Request") -> dict:
+        """Extract common query params for stock endpoints."""
+        args = {}
+        for key in ("ts_code", "name", "market", "exchange", "list_status",
+                     "start_date", "end_date", "trade_date", "is_hs", "is_open",
+                     "limit", "offset", "fields"):
+            val = request.query.get(key, None)
+            if val is not None:
+                if key in ("limit", "offset"):
+                    try:
+                        args[key] = int(val)
+                    except ValueError:
+                        pass
+                else:
+                    args[key] = val
+        return args
+
+    async def _handle_stock_basic(self, request: "web.Request") -> "web.Response":
+        """GET /api/stock/basic — stock list and basic info."""
+        args = self._parse_stock_args(request)
+        return await self._call_tushare("stock_basic", args)
+
+    async def _handle_stock_daily(self, request: "web.Request") -> "web.Response":
+        """GET /api/stock/daily — daily OHLCV price data."""
+        args = self._parse_stock_args(request)
+        return await self._call_tushare("daily", args)
+
+    async def _handle_stock_daily_basic(self, request: "web.Request") -> "web.Response":
+        """GET /api/stock/daily_basic — daily fundamental indicators."""
+        args = self._parse_stock_args(request)
+        return await self._call_tushare("daily_basic", args)
+
+    async def _handle_stock_income(self, request: "web.Request") -> "web.Response":
+        """GET /api/stock/income — income statement."""
+        args = self._parse_stock_args(request)
+        return await self._call_tushare("income", args)
+
+    async def _handle_stock_balancesheet(self, request: "web.Request") -> "web.Response":
+        """GET /api/stock/balancesheet — balance sheet."""
+        args = self._parse_stock_args(request)
+        return await self._call_tushare("balancesheet", args)
+
+    async def _handle_stock_cashflow(self, request: "web.Request") -> "web.Response":
+        """GET /api/stock/cashflow — cash flow statement."""
+        args = self._parse_stock_args(request)
+        return await self._call_tushare("cashflow", args)
 
     async def disconnect(self) -> None:
         """Stop the aiohttp web server."""

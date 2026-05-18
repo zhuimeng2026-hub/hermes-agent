@@ -2969,3 +2969,80 @@ class TestUserQuotaDaysRequests:
         assert db.count_user_requests("u2") == 1
         assert db.count_user_requests("u999") == 0
 
+
+class TestDailyQueryLimit:
+    """Tests for per-user daily query count tracking."""
+
+    def test_get_user_daily_state_new_user_auto_creates(self, db):
+        state = db.get_user_daily_state("new_user_1")
+        assert state["user_role"] == "free"
+        assert state["daily_query_count"] == 0
+        assert state["last_query_date"] is not None  # today's date
+
+    def test_get_user_daily_state_returns_existing(self, db):
+        # First call creates
+        state1 = db.get_user_daily_state("u_daily")
+        assert state1["daily_query_count"] == 0
+
+        # Bump the count
+        result = db.check_and_bump_daily_count("u_daily", "free")
+        assert result["allowed"] is True
+
+        # Re-read
+        state2 = db.get_user_daily_state("u_daily")
+        assert state2["daily_query_count"] == 1
+        assert state2["user_role"] == "free"
+
+    def test_check_and_bump_same_day_increments(self, db):
+        db.get_user_daily_state("u_inc")
+        db.check_and_bump_daily_count("u_inc", "free")
+        db.check_and_bump_daily_count("u_inc", "free")
+        state = db.get_user_daily_state("u_inc")
+        assert state["daily_query_count"] == 2
+
+    def test_check_and_bump_resets_on_new_day(self, db):
+        # Simulate yesterday's date
+        yesterday = (time.time() - 86400)
+        yesterday_str = time.strftime("%Y-%m-%d", time.localtime(yesterday))
+
+        def _set_yesterday(conn):
+            conn.execute(
+                "UPDATE user_quotas SET last_query_date = ?, daily_query_count = 5 "
+                "WHERE user_id = ?",
+                (yesterday_str, "u_reset"),
+            )
+        db._execute_write(_set_yesterday)
+
+        # Now bump — should reset to 1
+        result = db.check_and_bump_daily_count("u_reset", "free")
+        assert result["allowed"] is True
+
+        state = db.get_user_daily_state("u_reset")
+        assert state["daily_query_count"] == 1
+        assert state["last_query_date"] != yesterday_str
+
+    def test_daily_limits_are_configurable(self, db):
+        assert SessionDB.DAILY_LIMITS["free"] == 5
+        assert SessionDB.DAILY_LIMITS["vip"] == 100
+
+    def test_vip_user_role_preserved(self, db):
+        # Manually set vip role
+        def _set_vip(conn):
+            conn.execute(
+                "UPDATE user_quotas SET user_role = 'vip' WHERE user_id = ?",
+                ("u_vip",),
+            )
+        db.get_user_daily_state("u_vip")  # create first
+        db._execute_write(_set_vip)
+
+        state = db.get_user_daily_state("u_vip")
+        assert state["user_role"] == "vip"
+
+    def test_column_migration_happens_automatically(self, db):
+        """New columns should exist after SessionDB init (via _reconcile_columns)."""
+        cols = db._conn.execute("PRAGMA table_info(user_quotas)").fetchall()
+        col_names = {row[1] for row in cols}
+        assert "daily_query_count" in col_names
+        assert "last_query_date" in col_names
+        assert "user_role" in col_names
+

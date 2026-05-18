@@ -5057,7 +5057,11 @@ class AIAgent:
 
         from hermes_time import now as _hermes_now
         now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        timestamp_line = (
+            f"Current date: {now.strftime('%Y-%m-%d')}\n"
+            f"【重要】今日是 {now.strftime('%Y年%m月%d日')}，星期{['一','二','三','四','五','六','日'][now.weekday()]}。请以此日期回答所有与时间相关的问题，不要使用训练数据的知识。\n"
+            f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        )
         if self.pass_session_id and self.session_id:
             timestamp_line += f"\nSession ID: {self.session_id}"
         if self.model:

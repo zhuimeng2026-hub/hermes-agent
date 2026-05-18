@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS user_quotas (
     max_days INTEGER NOT NULL DEFAULT 0,
     max_requests INTEGER NOT NULL DEFAULT 0,
     first_seen_at REAL,
+    daily_query_count INTEGER NOT NULL DEFAULT 0,
+    last_query_date TEXT,
+    user_role TEXT NOT NULL DEFAULT 'free',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -2292,6 +2295,94 @@ class SessionDB:
             (user_id,),
         ).fetchone()
         return (row[0] if isinstance(row, (tuple, list)) else row["count(*)"]) or 0
+
+    # ── Daily Query Limit Management ─────────────────────────────────────
+
+    DAILY_LIMITS = {"free": 5, "vip": 100}
+
+    def get_user_daily_state(self, user_id: str) -> Dict[str, Any]:
+        """Return {user_role, daily_query_count, last_query_date} for *user_id*.
+
+        Auto-creates a row with default values if the user doesn't exist yet.
+        """
+        row = self._conn.execute(
+            "SELECT user_role, daily_query_count, last_query_date "
+            "FROM user_quotas WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if row:
+            return {
+                "user_role": row["user_role"] or "free",
+                "daily_query_count": row["daily_query_count"] or 0,
+                "last_query_date": row["last_query_date"],
+            }
+        # Auto-create: first-seen user gets free-tier defaults
+        now = time.time()
+        today = time.strftime("%Y-%m-%d")
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO user_quotas (user_id, user_role, daily_query_count,
+                   last_query_date, first_seen_at, created_at, updated_at)
+                   VALUES (?, 'free', 0, ?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO NOTHING""",
+                (user_id, today, now, now, now),
+            )
+        self._execute_write(_do)
+        return {"user_role": "free", "daily_query_count": 0, "last_query_date": today}
+
+    def check_and_bump_daily_count(
+        self, user_id: str, user_role: str = "free"
+    ) -> Dict[str, Any]:
+        """Atomically apply date-reset logic and increment daily_query_count.
+
+        Returns {allowed, remaining_count, limit}.
+        Caller has already validated the limit; this does the write.
+        Failures are logged but not raised — the caller proceeds regardless.
+        """
+        today = time.strftime("%Y-%m-%d")
+        limit = self.DAILY_LIMITS.get(user_role, 5)
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT daily_query_count, last_query_date, user_role "
+                "FROM user_quotas WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """INSERT INTO user_quotas (user_id, user_role, daily_query_count,
+                       last_query_date, first_seen_at, created_at, updated_at)
+                       VALUES (?, ?, 1, ?, ?, ?, ?)""",
+                    (user_id, user_role, today, time.time(), time.time(), time.time()),
+                )
+                return
+            stored_date = row["last_query_date"]
+            if stored_date != today:
+                # New day — reset count
+                conn.execute(
+                    "UPDATE user_quotas SET daily_query_count = 1, "
+                    "last_query_date = ?, updated_at = ? WHERE user_id = ?",
+                    (today, time.time(), user_id),
+                )
+            else:
+                # Same day — increment
+                conn.execute(
+                    "UPDATE user_quotas SET daily_query_count = daily_query_count + 1, "
+                    "updated_at = ? WHERE user_id = ?",
+                    (time.time(), user_id),
+                )
+
+        self._execute_write(_do)
+        new_count = (self._conn.execute(
+            "SELECT daily_query_count FROM user_quotas WHERE user_id = ?",
+            (user_id,),
+        ).fetchone())
+        new_count = (new_count["daily_query_count"] if isinstance(new_count, sqlite3.Row) else (new_count[0] if new_count else 0)) or 0
+        return {
+            "allowed": True,
+            "remaining_count": max(limit - new_count, 0),
+            "limit": limit,
+        }
 
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in.
