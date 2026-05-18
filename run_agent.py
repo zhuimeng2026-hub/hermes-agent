@@ -412,7 +412,7 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
             reserved_paths.append(scoped_path)
             continue
 
-        if tool_name not in _PARALLEL_SAFE_TOOLS:
+        if tool_name not in _PARALLEL_SAFE_TOOLS and not tool_name.startswith("mcp_"):
             return False
 
     return True

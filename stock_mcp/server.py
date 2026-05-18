@@ -204,22 +204,41 @@ def _fetch_sina_kline(code: str, period: str, count: int) -> list[dict]:
 # Stock search: akshare -> tushare fallback
 # ---------------------------------------------------------------------------
 
+# In-memory stock list cache (refreshed every 6 hours)
+_stock_list_cache: tuple[list[dict], float] | None = None
+_STOCK_LIST_CACHE_TTL = 21600  # 6 hours
+
+
+def _get_cached_stock_list() -> list[dict]:
+    """Return the full A-share stock list from cache, or load + cache it."""
+    global _stock_list_cache
+    now = time.time()
+    if _stock_list_cache is not None:
+        data, cached_at = _stock_list_cache
+        if now - cached_at < _STOCK_LIST_CACHE_TTL:
+            return data
+    import akshare as ak
+    import time as _time
+    df = ak.stock_info_a_code_name()
+    data = [
+        {"code": r["code"], "name": r["name"]}
+        for _, r in df.iterrows()
+    ]
+    _stock_list_cache = (data, _time.time())
+    return data
+
 
 def _search_akshare(query: str) -> list[dict]:
-    """Search via akshare stock list. Returns [{code, name}]."""
-    import akshare as ak
-
-    df = ak.stock_info_a_code_name()
+    """Search via cached akshare stock list. Returns [{code, name}]."""
+    stock_list = _get_cached_stock_list()
     q = query.strip()
-    mask = (
-        df["name"].str.contains(q, na=False)
-        | df["code"].str.startswith(q, na=False)
-    )
-    results = df[mask].head(10)
-    return [
-        {"code": r["code"], "name": r["name"]}
-        for _, r in results.iterrows()
-    ]
+    results = []
+    for s in stock_list:
+        if q in s["name"] or s["code"].startswith(q):
+            results.append(s)
+            if len(results) >= 10:
+                break
+    return results
 
 
 def _search_tushare(query: str) -> list[dict]:
@@ -249,7 +268,9 @@ def _search_tushare(query: str) -> list[dict]:
 mcp = FastMCP("stock-mcp")
 
 
-@mcp.tool()
+# NOTE: individual tools disabled in favor of stock_analyze which combines
+# search + price + kline into a single round-trip.  Keep implementations
+# as plain functions — stock_analyze calls them internally.
 async def stock_search(keyword: str) -> str:
     """Search A-share stocks by name, code, or pinyin.
 
@@ -286,7 +307,6 @@ async def stock_search(keyword: str) -> str:
     )
 
 
-@mcp.tool()
 async def stock_price(codes: str) -> str:
     """Get real-time quotes for one or more A-share stocks.
 
@@ -318,7 +338,7 @@ async def stock_price(codes: str) -> str:
         )
 
 
-@mcp.tool()
+
 async def stock_kline(code: str, period: str = "daily", count: int = 60) -> str:
     """Get K-line (candlestick) data for a stock.
 
@@ -348,6 +368,72 @@ async def stock_kline(code: str, period: str = "daily", count: int = 60) -> str:
             {"success": False, "message": f"K线获取失败: {e}"},
             ensure_ascii=False,
         )
+
+
+@mcp.tool()
+async def stock_analyze(keyword: str) -> str:
+    """Search a stock by name/code and return quote + recent K-line in one call.
+
+    Use this for stock analysis queries. It combines search, price, and
+    daily K-line into a single response — much faster than calling each
+    tool separately.
+
+    Args:
+        keyword: Stock name, code, or pinyin (e.g. '茅台', '600519', 'pingan')
+    """
+    loop = asyncio.get_running_loop()
+
+    # Step 1: search (cached, fast after first load)
+    try:
+        results = await loop.run_in_executor(None, _search_akshare, keyword)
+    except Exception as e:
+        logger.debug("akshare search failed in analyze: %s", e)
+        results = []
+
+    if not results:
+        try:
+            results = await loop.run_in_executor(None, _search_tushare, keyword)
+        except Exception:
+            results = []
+
+    if not results:
+        return json.dumps(
+            {"success": False, "message": f"未找到相关股票: {keyword}"},
+            ensure_ascii=False,
+        )
+
+    # Take top match
+    stock = results[0]
+    code = stock["code"]
+    name = stock["name"]
+    candidates = [r["code"] for r in results[:3]]
+
+    # Step 2: price (Sina, fast)
+    price_data = None
+    try:
+        price_result = json.loads(await stock_price(code))
+        if price_result.get("success"):
+            price_data = price_result.get("stocks", [{}])[0] if price_result.get("stocks") else None
+    except Exception:
+        pass
+
+    # Step 3: daily K-line (Sina, fast)
+    kline_data = None
+    try:
+        kline_result = json.loads(await stock_kline(f"{code},daily,15"))
+        if kline_result.get("success", True):
+            kline_data = kline_result.get("bars")
+    except Exception:
+        pass
+
+    return json.dumps({
+        "success": True,
+        "code": code,
+        "name": name,
+        "price": price_data,
+        "kline_daily": kline_data,
+        "also_matched": candidates[1:],
+    }, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
