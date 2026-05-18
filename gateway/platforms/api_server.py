@@ -1375,10 +1375,23 @@ class APIServerAdapter(BasePlatformAdapter):
 
         Lightweight endpoint called by frontends when queries bypass Hermes
         (e.g. NewAPI direct path).  No auth required.
+
+        Request body (optional JSON):
+            input_tokens:  int  — prompt tokens consumed
+            output_tokens: int  — completion tokens generated
         """
         user_id = request.headers.get("X-User-Id", "").strip()
         if not user_id:
             return web.json_response({"code": 0, "msg": "no user_id, skipped"})
+
+        input_tokens = 0
+        output_tokens = 0
+        try:
+            body = await request.json()
+            input_tokens = max(0, int(body.get("input_tokens", 0) or 0))
+            output_tokens = max(0, int(body.get("output_tokens", 0) or 0))
+        except Exception:
+            pass  # body optional
 
         try:
             db = self._ensure_session_db()
@@ -1388,6 +1401,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 if state:
                     user_role = state.get("user_role", "free")
                 db.check_and_bump_daily_count(user_id, user_role)
+
+                # Record a completed session for token usage tracking
+                sid = f"newapi-{uuid.uuid4().hex[:16]}"
+                db.create_session(sid, "api_server", user_id=user_id,
+                                  model="newapi-direct")
+                if input_tokens or output_tokens:
+                    db.update_token_counts(sid, input_tokens=input_tokens,
+                                           output_tokens=output_tokens)
+                db.end_session(sid, "completed")
         except Exception:
             logger.warning("bump-usage failed for %s", user_id, exc_info=True)
 
