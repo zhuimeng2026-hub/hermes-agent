@@ -2298,7 +2298,7 @@ class SessionDB:
 
     # ── Daily Query Limit Management ─────────────────────────────────────
 
-    DAILY_LIMITS = {"free": 25, "vip": 500}
+    DAILY_LIMITS = {"free": 100, "vip": 500}
 
     def resolve_daily_limit(self, user_id: str, user_role: str = "free") -> int:
         """Return the daily query limit for *user_id*.
