@@ -1,0 +1,41 @@
+model:
+  default: qwen-plus
+  provider: custom
+  base_url: https://aikey.aixifs.com/v1
+  api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+  context_length: 1000000
+agent:
+  image_input_mode: text
+  max_turns: 8
+delegation:
+  model: qwen-plus
+  provider: custom
+  base_url: https://aikey.aixifs.com/v1
+  api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+auxiliary:
+  vision:
+    provider: custom
+    model: qwen-vl-max
+    base_url: https://aikey.aixifs.com/v1
+    api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+  web_extract:
+    provider: custom
+    model: glm-4-flash
+    base_url: https://aikey.aixifs.com/v1
+    api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+fallback_providers:
+  - provider: custom
+    model: qwen-max
+    base_url: https://aikey.aixifs.com/v1
+    api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+  - provider: custom
+    model: deepseek-v4-pro
+    base_url: https://aikey.aixifs.com/v1
+    api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+mcp_servers:
+  stock:
+    command: /opt/hermes-agent/.venv/bin/python
+    args: ["-m", "stock_mcp.server"]
+onboarding:
+  seen:
+    openclaw_residue_cleanup: true

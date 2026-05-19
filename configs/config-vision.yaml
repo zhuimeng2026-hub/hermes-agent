@@ -1,0 +1,33 @@
+# Hermes Vision — dedicated API server for image queries
+# Uses mimo-v2-omni (vision-capable model) for delegation
+
+model:
+  default: deepseek-v4-pro
+  provider: custom
+  base_url: https://aikey.aixifs.com/v1
+  api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+  context_length: 1000000
+
+agent:
+  image_input_mode: native
+
+delegation:
+  model: mimo-v2-omni
+  provider: custom
+  base_url: https://aikey.aixifs.com/v1
+  api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+
+fallback_providers:
+  - provider: custom
+    model: Qwen3.6-Max
+    base_url: https://aikey.aixifs.com/v1
+    api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+  - provider: custom
+    model: mimo-v2-omni
+    base_url: https://aikey.aixifs.com/v1
+    api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
+
+mcp_servers:
+  stock:
+    command: /opt/hermes-agent/.venv/bin/python
+    args: ["-m", "stock_mcp.server"]
