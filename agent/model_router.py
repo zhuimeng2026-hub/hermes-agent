@@ -10,11 +10,28 @@ Uses the centralized call_llm() from auxiliary_client as transport.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 from agent.auxiliary_client import call_llm
 
 logger = logging.getLogger(__name__)
+
+# ── Load delegation model from config ─────────────────────────────────────
+def _load_delegation_model() -> str:
+    """Load the delegation.model from config.yaml"""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        model = cfg.get('delegation', {}).get('model', '')
+        if model:
+            logger.info(f"Using delegation model: {model}")
+            return model
+    except Exception as e:
+        logger.debug(f"Could not load delegation model: {e}")
+    return "deepseek-v4-flash"  # fallback
+
+_DELEGATION_MODEL = _load_delegation_model()
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -22,13 +39,13 @@ COMPLEX_KEYWORDS = (
     "研报", "公告", "财报", "政策影响", "行业分析", "持仓分析", "组合优化",
 )
 
-# (provider, model) pairs
+# (provider, model) pairs — use delegation model
 ROUTE_TABLE: dict[tuple[str, str], tuple[str, str]] = {
     # (user_level, query_type) → (provider, model)
-    ("free", "simple"):  ("custom", "deepseek-v4-flash"),
-    ("free", "complex"): ("custom", "deepseek-v4-flash"),
-    ("vip",  "simple"):  ("custom", "deepseek-v4-flash"),
-    ("vip",  "complex"): ("custom", "deepseek-v4-flash"),
+    ("free", "simple"):  ("custom", _DELEGATION_MODEL),
+    ("free", "complex"): ("custom", _DELEGATION_MODEL),
+    ("vip",  "simple"):  ("custom", _DELEGATION_MODEL),
+    ("vip",  "complex"): ("custom", _DELEGATION_MODEL),
 }
 
 # Fallback: same-tier alternative when primary fails
