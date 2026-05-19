@@ -573,7 +573,7 @@ async def vision_analyze_tool(
             "task": "vision",
             "messages": messages,
             "temperature": vision_temperature,
-            "max_tokens": 300,
+            "max_tokens": 800,
             "timeout": vision_timeout,
         }
         if model:
