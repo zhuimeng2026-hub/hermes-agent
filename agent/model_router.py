@@ -39,18 +39,31 @@ COMPLEX_KEYWORDS = (
     "研报", "公告", "财报", "政策影响", "行业分析", "持仓分析", "组合优化",
 )
 
-# (provider, model) pairs — use delegation model
+# 用户质疑 AI 回复 → 切 deepseek 深度推理
+CHALLENGE_KEYWORDS = (
+    "不对", "错了", "不正确", "不准确", "不准",
+    "你再想想", "重新分析", "重新看", "再分析",
+    "不是这样", "有问题", "搞错了", "弄错了",
+    "怎么可能", "不应该", "我觉得不对",
+    "再查一下", "再搜一下", "再确认",
+    "换个角度", "深入分析", "详细分析",
+)
+
+# (provider, model) pairs
 ROUTE_TABLE: dict[tuple[str, str], tuple[str, str]] = {
     # (user_level, query_type) → (provider, model)
     ("free", "simple"):  ("custom", _DELEGATION_MODEL),
     ("free", "complex"): ("custom", _DELEGATION_MODEL),
+    ("free", "deep"):    ("custom", "deepseek-v4-pro"),
     ("vip",  "simple"):  ("custom", _DELEGATION_MODEL),
     ("vip",  "complex"): ("custom", _DELEGATION_MODEL),
+    ("vip",  "deep"):    ("custom", "deepseek-v4-pro"),
 }
 
 # Fallback: same-tier alternative when primary fails
 FALLBACK_TABLE: dict[tuple[str, str], tuple[str, str]] = {
-    ("custom", "deepseek-v4-flash"): ("custom", "deepseek-v4-pro"),
+    ("custom", _DELEGATION_MODEL): ("custom", "deepseek-v4-pro"),
+    ("custom", "deepseek-v4-pro"): ("custom", "qwen-max"),
 }
 
 
@@ -64,7 +77,10 @@ class RouteResult:
 # ── Core ────────────────────────────────────────────────────────────────────
 
 def classify_query(text: str) -> str:
-    """Return 'complex' if text hits any financial keyword, else 'simple'."""
+    """Return query type: 'deep' (challenge), 'complex' (financial analysis), or 'simple'."""
+    for kw in CHALLENGE_KEYWORDS:
+        if kw in text:
+            return "deep"
     for kw in COMPLEX_KEYWORDS:
         if kw in text:
             return "complex"
