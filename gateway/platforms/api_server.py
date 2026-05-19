@@ -1033,9 +1033,14 @@ class APIServerAdapter(BasePlatformAdapter):
         import base64 as _base64
 
         analysis_prompt = (
-            "Describe everything visible in this image in thorough detail. "
-            "Include any text, code, data, objects, people, layout, colors, "
-            "and any other notable visual information."
+            "You are analyzing a screenshot from a Chinese stock trading app. "
+            "Describe all visible data in detail: stock names, codes, prices, "
+            "change percentages (+/-%), volume, technical indicators, K-line patterns, "
+            "market indices, and any other financial data shown. "
+            "IMPORTANT: This is the Chinese stock market — A-shares (6-digit codes like 600519), "
+            "B-shares (900xxx), H-shares, or other China-related securities. "
+            "NOT cryptocurrency. Prices are in Chinese Yuan (CNY/元) or Hong Kong Dollar (HKD). "
+            "Report the exact numbers you see — do not summarize or round."
         )
 
         enriched_parts: List[str] = []
