@@ -25,10 +25,6 @@ auxiliary:
     api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
 fallback_providers:
   - provider: custom
-    model: qwen-max
-    base_url: https://aikey.aixifs.com/v1
-    api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
-  - provider: custom
     model: deepseek-v4-pro
     base_url: https://aikey.aixifs.com/v1
     api_key: t7npV6raGbd2f4HOMR4RRi0gsK2MbvPWk5TMs4i8Q9eJ80cG
