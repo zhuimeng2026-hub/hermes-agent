@@ -568,6 +568,8 @@ def _is_trading_hours() -> bool:
 def _resolve_sina_code(code: str) -> str:
     """Convert stock code to Sina format: sz000001 or sh600519."""
     c = code.strip().lower()
+    # Strip tushare-style suffix (.sh/.sz)
+    c = c.removesuffix(".sh").removesuffix(".sz")
     if c.startswith(("sz", "sh")):
         return c
     c = c.zfill(6)
@@ -910,9 +912,9 @@ async def stock_analyze(keyword: str) -> str:
             ensure_ascii=False,
         )
 
-    # Take top match
+    # Take top match — strip tushare-style suffix (.SH/.SZ)
     stock = results[0]
-    code = stock["code"]
+    code = stock["code"].split(".")[0] if "." in stock["code"] else stock["code"]
     name = stock["name"]
     candidates = [r["code"] for r in results[:3]]
 
@@ -928,7 +930,7 @@ async def stock_analyze(keyword: str) -> str:
     # Step 3: daily K-line (Sina, fast)
     kline_data = None
     try:
-        kline_result = json.loads(await stock_kline(f"{code},daily,15"))
+        kline_result = json.loads(await stock_kline(code, "daily", 15))
         if kline_result.get("success", True):
             kline_data = kline_result.get("bars")
     except Exception:
