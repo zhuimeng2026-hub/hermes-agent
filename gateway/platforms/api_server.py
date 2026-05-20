@@ -1279,6 +1279,7 @@ class APIServerAdapter(BasePlatformAdapter):
     # ── Daily Query Limit Management ─────────────────────────────────────
 
     UPGRADE_MSG = "今日查询次数已用完，开通会员立享每日500次查询+专属研报解读功能"
+    TRIAL_EXPIRED_MSG = "试用期已到期，请充值会员继续使用"
 
     def _enforce_daily_limit(self, user_id: str) -> tuple:
         """Enforce daily per-user query limits.
@@ -1312,6 +1313,22 @@ class APIServerAdapter(BasePlatformAdapter):
         # Date-reset: new day → count starts fresh
         if last_date != today:
             current_count = 0
+
+        # Trial expiration: check max_days against first_seen_at
+        quota = db.get_user_quota(user_id)
+        if quota:
+            max_days = int(quota.get("max_days") or 0)
+            first_seen = quota.get("first_seen_at")
+            if max_days > 0 and first_seen:
+                elapsed_days = (time.time() - float(first_seen)) / 86400
+                if elapsed_days > max_days:
+                    return (
+                        web.json_response(
+                            {"code": 402, "msg": self.TRIAL_EXPIRED_MSG, "data": {"remaining_count": 0}},
+                            status=402,
+                        ),
+                        user_role, 0,
+                    )
 
         limit = db.resolve_daily_limit(user_id, user_role)
 

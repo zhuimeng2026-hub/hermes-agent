@@ -2335,8 +2335,8 @@ class SessionDB:
         def _do(conn):
             conn.execute(
                 """INSERT INTO user_quotas (user_id, user_role, daily_query_count,
-                   last_query_date, first_seen_at, created_at, updated_at)
-                   VALUES (?, 'free', 0, ?, ?, ?, ?)
+                   last_query_date, first_seen_at, created_at, updated_at, max_days)
+                   VALUES (?, 'free', 0, ?, ?, ?, ?, 7)
                    ON CONFLICT(user_id) DO NOTHING""",
                 (user_id, today, now, now, now),
             )
@@ -2364,8 +2364,8 @@ class SessionDB:
             if row is None:
                 conn.execute(
                     """INSERT INTO user_quotas (user_id, user_role, daily_query_count,
-                       last_query_date, first_seen_at, created_at, updated_at)
-                       VALUES (?, ?, 1, ?, ?, ?, ?)""",
+                       last_query_date, first_seen_at, created_at, updated_at, max_days)
+                       VALUES (?, ?, 1, ?, ?, ?, ?, 7)""",
                     (user_id, user_role, today, time.time(), time.time(), time.time()),
                 )
                 return
