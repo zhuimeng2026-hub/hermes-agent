@@ -472,8 +472,11 @@ _stop_scheduler = threading.Event()
 
 
 def _run_scheduler() -> None:
-    """Background scheduler for periodic data sync."""
-    # Track last sync date to avoid duplicate runs
+    """Background scheduler for periodic data sync.
+
+    Runs after market close (16:10) to avoid hitting free Sina/akshare
+    APIs during peak trading hours, which are unstable under load.
+    """
     last_basic_sync = ""
     last_kline_sync = ""
     last_financial_sync = ""
@@ -485,26 +488,25 @@ def _run_scheduler() -> None:
             current_hour = now.hour
             current_minute = now.minute
 
-            # 02:00 - Stock basics (daily)
-            if current_hour == 2 and current_minute < 10 and last_basic_sync != current_date:
-                logger.info("Running scheduled stock basics sync...")
+            # 16:10 - Stock basics (daily, after market close)
+            if current_hour == 16 and 10 <= current_minute < 20 and last_basic_sync != current_date:
+                logger.info("Running scheduled stock basics sync (post-market)...")
                 _sync_stock_basics()
                 last_basic_sync = current_date
 
-            # 02:30 - K-line data for top stocks (daily)
-            if current_hour == 2 and 30 <= current_minute < 40 and last_kline_sync != current_date:
-                logger.info("Running scheduled K-line sync...")
-                # Sync popular stocks (top 20 by market cap simulation)
-                top_stocks = _get_top_stocks(20)
-                _sync_stock_klines(top_stocks, "daily", 100)
+            # 16:20 - K-line data for top stocks (daily, after market close)
+            if current_hour == 16 and 20 <= current_minute < 30 and last_kline_sync != current_date:
+                logger.info("Running scheduled K-line sync (post-market)...")
+                top_stocks = _get_top_stocks(50)
+                _sync_stock_klines(top_stocks, "daily", 200)
                 last_kline_sync = current_date
 
-            # 03:00 - Financial data (weekly on Sunday)
-            if current_hour == 3 and current_minute < 10:
+            # 17:00 - Financial data (weekly on Sunday)
+            if current_hour == 17 and current_minute < 10:
                 if now.weekday() == 6:  # Sunday
                     if last_financial_sync != current_date:
-                        logger.info("Running scheduled financial sync...")
-                        _sync_stock_financials()  # Sync first 50 stocks
+                        logger.info("Running scheduled financial sync (post-market)...")
+                        _sync_stock_financials()
                         last_financial_sync = current_date
 
         except Exception as e:
