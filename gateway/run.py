@@ -2309,13 +2309,13 @@ class GatewayRunner:
             )
         elif is_queue_mode:
             message = (
-                f"⏳ Queued for the next turn{status_detail}. "
-                f"I'll respond once the current task finishes."
+                f"⏳ 当前任务处理中，消息已排队{status_detail}。"
+                f"我会在当前任务完成后回复你。"
             )
         else:
             message = (
-                f"⚡ Interrupting current task{status_detail}. "
-                f"I'll respond to your message shortly."
+                f"⚡ 正在打断当前任务{status_detail}。"
+                f"稍后就来回复你。"
             )
 
         # First-touch onboarding: the very first time a user sends a message

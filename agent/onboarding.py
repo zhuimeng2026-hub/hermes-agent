@@ -40,22 +40,18 @@ def busy_input_hint_gateway(mode: str) -> str:
     """
     if mode == "queue":
         return (
-            "💡 First-time tip — I queued your message instead of interrupting. "
-            "Send `/busy interrupt` to make new messages stop the current task "
-            "immediately, or `/busy status` to check. This notice won't appear again."
+            "💡 首次提示 —— 消息已排队，不会打断当前任务。"
+            "发送 `/busy interrupt` 改为直接打断，或 `/busy status` 查看当前状态。此提示仅显示一次。"
         )
     if mode == "steer":
         return (
-            "💡 First-time tip — I steered your message into the current run; "
-            "it will arrive after the next tool call instead of interrupting. "
-            "Send `/busy interrupt` or `/busy queue` to change this, or "
-            "`/busy status` to check. This notice won't appear again."
+            "💡 首次提示 —— 消息已注入当前任务，将在下一次工具调用后处理。"
+            "发送 `/busy interrupt` 或 `/busy queue` 切换模式，或 `/busy status` 查看状态。此提示仅显示一次。"
         )
     return (
-        "💡 First-time tip — I just interrupted my current task to answer you. "
-        "Send `/busy queue` to queue follow-ups for after the current task instead, "
-        "`/busy steer` to inject them mid-run without interrupting, or "
-        "`/busy status` to check. This notice won't appear again."
+        "💡 首次提示 —— 刚打断了当前任务来回复你。"
+        "发送 `/busy queue` 将后续消息排队等待，`/busy steer` 注入当前任务而不打断，"
+        "或 `/busy status` 查看状态。此提示仅显示一次。"
     )
 
 
@@ -63,20 +59,17 @@ def busy_input_hint_cli(mode: str) -> str:
     """CLI version of the busy-input hint (plain text, no markdown)."""
     if mode == "queue":
         return (
-            "(tip) Your message was queued for the next turn. "
-            "Use /busy interrupt to make Enter stop the current run instead, "
-            "or /busy steer to inject mid-run. This tip only shows once."
+            "(tip) 消息已排队，将在当前任务完成后处理。"
+            "使用 /busy interrupt 改为直接打断，或 /busy steer 注入当前任务。此提示仅显示一次。"
         )
     if mode == "steer":
         return (
-            "(tip) Your message was steered into the current run; it arrives "
-            "after the next tool call. Use /busy interrupt or /busy queue to "
-            "change this. This tip only shows once."
+            "(tip) 消息已注入当前任务，将在下一次工具调用后处理。"
+            "使用 /busy interrupt 或 /busy queue 切换模式。此提示仅显示一次。"
         )
     return (
-        "(tip) Your message interrupted the current run. "
-        "Use /busy queue to queue messages for the next turn instead, "
-        "or /busy steer to inject mid-run. This tip only shows once."
+        "(tip) 刚打断了当前任务来回复你。"
+        "使用 /busy queue 将后续消息排队等待，或 /busy steer 注入当前任务。此提示仅显示一次。"
     )
 
 

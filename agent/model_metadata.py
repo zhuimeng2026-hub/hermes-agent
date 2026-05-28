@@ -1352,6 +1352,7 @@ def get_model_context_length(
                 "in config.yaml to override.",
                 model, base_url, f"{DEFAULT_FALLBACK_CONTEXT:,}",
             )
+            save_context_length(model, base_url, DEFAULT_FALLBACK_CONTEXT)
             return DEFAULT_FALLBACK_CONTEXT
 
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)

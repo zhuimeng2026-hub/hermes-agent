@@ -36,7 +36,13 @@ except ImportError:
     HTTPX_AVAILABLE = False
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    SendResult,
+    cache_image_from_bytes,
+)
 from gateway.platforms.wecom_crypto import WXBizMsgCrypt, WeComCryptoError
 
 logger = logging.getLogger(__name__)
@@ -260,6 +266,15 @@ class WecomCallbackAdapter(BasePlatformAdapter):
                 )
                 event = self._build_event(app, decrypted)
                 if event is not None:
+                    # Download WeCom media (images) to local cache.
+                    if event.message_type == MessageType.PHOTO and event.media_urls:
+                        media_id = event.media_urls[0]
+                        try:
+                            cached = await self._download_and_cache_media(app, media_id)
+                            if cached:
+                                event.media_urls = [cached]
+                        except Exception:
+                            logger.exception("[WecomCallback] Failed to download media %s", media_id)
                     # Deduplicate: WeCom retries callbacks on timeout,
                     # producing duplicate inbound messages (#10305).
                     if event.message_id:
@@ -323,15 +338,12 @@ class WecomCallbackAdapter(BasePlatformAdapter):
             event_name = (root.findtext("Event") or "").lower()
             if event_name in {"enter_agent", "subscribe"}:
                 return None
-        if msg_type not in {"text", "event"}:
+        if msg_type not in {"text", "event", "image"}:
             return None
 
         user_id = root.findtext("FromUserName", default="")
         corp_id = root.findtext("ToUserName", default=app.get("corp_id", ""))
         scoped_chat_id = self._user_app_key(corp_id, user_id)
-        content = root.findtext("Content", default="").strip()
-        if not content and msg_type == "event":
-            content = "/start"
         msg_id = (
             root.findtext("MsgId")
             or f"{user_id}:{root.findtext('CreateTime', default='0')}"
@@ -343,6 +355,22 @@ class WecomCallbackAdapter(BasePlatformAdapter):
             user_id=user_id,
             user_name=user_id,
         )
+
+        if msg_type == "image":
+            media_id = root.findtext("MediaId", default="")
+            return MessageEvent(
+                text="[图片]",
+                message_type=MessageType.PHOTO,
+                source=source,
+                raw_message=xml_text,
+                message_id=msg_id,
+                media_urls=[media_id] if media_id else [],
+                media_types=["image/jpeg"] if media_id else [],
+            )
+
+        content = root.findtext("Content", default="").strip()
+        if not content and msg_type == "event":
+            content = "/start"
         return MessageEvent(
             text=content,
             message_type=MessageType.TEXT,
@@ -369,6 +397,39 @@ class WecomCallbackAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     # Access-token management
     # ------------------------------------------------------------------
+
+    async def _download_and_cache_media(self, app: Dict[str, Any], media_id: str) -> Optional[str]:
+        """Download WeCom media (image) by MediaId and cache it locally.
+
+        Returns the cached file path, or None if download/caching fails.
+        """
+        if not media_id or not self._http_client:
+            return None
+        try:
+            token = await self._get_access_token(app)
+            resp = await self._http_client.get(
+                "https://qyapi.weixin.qq.com/cgi-bin/media/get",
+                params={"access_token": token, "media_id": media_id},
+                follow_redirects=True,
+            )
+            content_type = resp.headers.get("content-type", "")
+            if "image" not in content_type and "application" not in content_type:
+                logger.warning(
+                    "[WecomCallback] media/get returned non-image content-type: %s",
+                    content_type,
+                )
+                return None
+            ext = ".jpg"
+            if "png" in content_type:
+                ext = ".png"
+            elif "gif" in content_type:
+                ext = ".gif"
+            elif "webp" in content_type:
+                ext = ".webp"
+            return cache_image_from_bytes(resp.content, ext=ext)
+        except Exception as exc:
+            logger.warning("[WecomCallback] Failed to download media %s: %s", media_id, exc)
+            return None
 
     async def _get_access_token(self, app: Dict[str, Any]) -> str:
         cached = self._access_tokens.get(app["name"])
